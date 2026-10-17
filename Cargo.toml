@@ -13,6 +13,7 @@ members = [
     "crates/rpc",
     "crates/cli",
     "crates/caps",
+    "crates/config",
 ]
 
 [workspace.package]
@@ -40,6 +41,8 @@ blake3 = "1"
 vuoxi-rpc = { path = "crates/rpc" }
 biscuit-auth = "6"
 ed25519-dalek = "2"
+toml = "0.8"
+vuoxi-config = { path = "crates/config" }
 
 [profile.release]
 lto = true

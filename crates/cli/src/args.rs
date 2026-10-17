@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 pub const USAGE: &str = "vuoxi - battery-aware file sync
-usage: vuoxi [--json] [--socket PATH] [--fields a,b] <command>
+usage: vuoxi [--json] [--socket PATH] [--config PATH] [--fields a,b] <command>
   status                            head, files, conflicts, peers
   changes [--since N] [--limit N]   journal tail; `next=N` continues
   conflicts [--since N] [--limit N] concurrent edits, both kept
@@ -12,6 +12,12 @@ usage: vuoxi [--json] [--socket PATH] [--fields a,b] <command>
   revert PLAN                       undo an applied plan
   daemon [--read-only]              serve the socket (fake state for now)
   mcp-serve                         MCP over stdio (not implemented yet)
+  init                              create device key and config; print the id
+  id                                print this device's id
+  pair NAME ID ADDR...              add or replace a peer
+  folder add ID PATH [--tag T] [--peer NAME]...
+  folder list                       configured folders
+  config path                       where the config file is
 output: one line per item; --json or VUOXI_FORMAT=json for JSON
 `vuoxi <command> --help` for one command";
 
@@ -25,6 +31,19 @@ pub enum Cmd {
     Revert(String),
     Daemon,
     McpServe,
+    Init,
+    Id,
+    Pair {
+        name: String,
+        id: String,
+        addrs: Vec<String>,
+    },
+    FolderAdd {
+        id: String,
+        path: PathBuf,
+    },
+    FolderList,
+    ConfigPath,
     Help(Option<&'static str>),
 }
 
@@ -36,6 +55,9 @@ pub struct Opts {
     pub limit: Option<u64>,
     pub fields: Option<Vec<String>>,
     pub read_only: bool,
+    pub config: Option<PathBuf>,
+    pub tag: Option<String>,
+    pub peers: Vec<String>,
 }
 
 pub fn command_help(cmd: &str) -> Option<&'static str> {
@@ -53,6 +75,18 @@ pub fn command_help(cmd: &str) -> Option<&'static str> {
             "vuoxi daemon [--read-only] [--socket PATH]: serve fake state; read-only denies plan/apply/revert"
         }
         "mcp-serve" => "vuoxi mcp-serve: stdio MCP adapter (not implemented yet)",
+        "init" => {
+            "vuoxi init [--config PATH]: create the device key and config if absent; print the id"
+        }
+        "id" => "vuoxi id [--config PATH]: print this device's id (the key sits beside the config)",
+        "pair" => {
+            "vuoxi pair NAME ID ADDR... [--config PATH]: add or replace a peer; ADDR is host:port, e.g. [2001:db8::1]:41641"
+        }
+        "folder" => {
+            "vuoxi folder add ID PATH [--tag T] [--peer NAME]... | vuoxi folder list  [--config PATH]\n\
+             ID is [a-z0-9-]{1,64}; PATH is made absolute; folders may not nest"
+        }
+        "config" => "vuoxi config path [--config PATH]: print the config file location",
         _ => return None,
     })
 }
@@ -78,6 +112,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
             "--json" => o.json = Some(true),
             "--text" => o.json = Some(false),
             "--read-only" => o.read_only = true,
+            "--config" => o.config = Some(value().ok_or("--config needs a path")?.into()),
+            "--tag" => o.tag = Some(value().ok_or("--tag needs a value")?),
+            "--peer" => o.peers.push(value().ok_or("--peer needs a name")?),
             "--socket" => o.socket = Some(value().ok_or("--socket needs a path")?.into()),
             "--since" => o.since = Some(num("--since", value())?),
             "--limit" => o.limit = Some(num("--limit", value())?),
@@ -115,6 +152,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
     }
     if name != "daemon" && o.read_only {
         return Err("--read-only applies to daemon only".into());
+    }
+    let folder_add = name == "folder" && rest.first().is_some_and(|s| s == "add");
+    if (o.tag.is_some() || !o.peers.is_empty()) && !folder_add {
+        return Err("--tag/--peer apply to `folder add` only".into());
+    }
+    let local = matches!(name.as_str(), "init" | "id" | "pair" | "folder" | "config");
+    if o.config.is_some() && !local {
+        return Err(format!("--config does not apply to {name}"));
     }
     let arity = |max: usize, min: usize, what: &str| {
         if rest.len() < min || rest.len() > max {
@@ -156,6 +201,43 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
             arity(0, 0, "no arguments")?;
             Cmd::McpServe
         }
+        "init" => {
+            arity(0, 0, "no arguments")?;
+            Cmd::Init
+        }
+        "id" => {
+            arity(0, 0, "no arguments")?;
+            Cmd::Id
+        }
+        "pair" => {
+            arity(usize::MAX, 3, "NAME ID ADDR...")?;
+            Cmd::Pair {
+                name: rest[0].clone(),
+                id: rest[1].clone(),
+                addrs: rest[2..].to_vec(),
+            }
+        }
+        "folder" => match rest.first().map(String::as_str) {
+            Some("add") => {
+                arity(3, 3, "add ID PATH")?;
+                Cmd::FolderAdd {
+                    id: rest[1].clone(),
+                    path: rest[2].clone().into(),
+                }
+            }
+            Some("list") => {
+                arity(1, 1, "list")?;
+                Cmd::FolderList
+            }
+            _ => return Err("folder: expected `add ID PATH` or `list`".into()),
+        },
+        "config" => match rest.first().map(String::as_str) {
+            Some("path") => {
+                arity(1, 1, "path")?;
+                Cmd::ConfigPath
+            }
+            _ => return Err("config: expected `path`".into()),
+        },
         _ => return Err(format!("unknown command: {name}")),
     };
     Ok((cmd, o))
@@ -187,6 +269,28 @@ mod tests {
         assert!(p("changes --bogus").is_err());
         assert!(p("nope").is_err());
         assert!(p("status --read-only").is_err());
+    }
+
+    #[test]
+    fn config_commands() {
+        assert_eq!(
+            p("init --config x.toml").unwrap().1.config.unwrap(),
+            PathBuf::from("x.toml")
+        );
+        let (c, o) = p("folder add docs /d --tag t --peer a --peer=b").unwrap();
+        assert!(matches!(c, Cmd::FolderAdd { .. }));
+        assert_eq!((o.tag.as_deref(), o.peers.len()), (Some("t"), 2));
+        assert!(
+            matches!(p("pair n id [::1]:1 1.2.3.4:5").unwrap().0, Cmd::Pair { addrs, .. } if addrs.len() == 2)
+        );
+        assert!(p("pair n id").is_err());
+        assert!(p("folder").is_err());
+        assert!(p("folder add docs").is_err());
+        assert!(p("folder list --tag x").is_err());
+        assert!(p("status --peer a").is_err());
+        assert!(p("status --config x").is_err());
+        assert_eq!(p("config path").unwrap().0, Cmd::ConfigPath);
+        assert!(p("config").is_err());
     }
 
     #[test]
