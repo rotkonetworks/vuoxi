@@ -69,7 +69,7 @@ build both and measure instead of deciding in advance.
 | `core` | `Request`/`Response`, ids, `VersionVector`, the `Engine`/`Transport`/`Store` seams |
 | `layers` | `ModeGate`, `Coalesce`, power state; `WakeBudget`, `Thermal` next |
 | `watcher` | privileged fanotify helper |
-| `store` | append-only change journal + manifest index (commonware `storage::journal`) |
+| `store` | change journal (commonware `storage::journal`) + manifest index (NOMT) |
 | `transport-iroh` | QUIC via iroh, `iroh-blobs` for verified BLAKE3 transfer |
 | `transport-commonware` | `p2p::authenticated` among a fixed set of keyed peers |
 | `archive` | ZODA erasure-coded backup tier |
@@ -97,6 +97,33 @@ drowse already tests its own footprint.
   shifts bytes resends only the chunks it touched.
 - `VersionVector::compare` yields Equal, Behind, Ahead or Concurrent. Concurrent
   edits keep both versions; vuoxi never silently overwrites.
+
+## Storage and reconciliation
+
+```
+journal   per-device change log, numbered 1, 2, 3, …     commonware storage::journal
+index     PathId → Manifest; its root is the folder state  NOMT
+```
+
+**Normal case: one integer per peer.** Each device numbers its own changes in
+its journal. A peer remembers "seen up to 48 211" and asks only for what is
+newer. Reconnecting after sleep costs that one number.
+
+**Repair: compare roots.** After a crash, a new device, or any doubt, peers
+compare index roots. NOMT is a sparse Merkle trie over hashed keys, so its root
+depends only on contents: equal roots mean equal folders, after one message.
+Unequal roots are walked down to the differing entries, at a cost proportional
+to the differences, not to the 1.8 million files.
+
+**Why NOMT.** One embedded store holds the index *and* produces the root in the
+same atomic commit, instead of a key-value store plus a hand-synchronised hash
+tree. One Batched burst is one NOMT session and one new root. No RocksDB-style
+background compaction. Rollback gives recent history for free.
+
+**Patterns borrowed from cnidarium:** snapshot + copy-on-write overlay committed
+atomically (a sync burst lands whole or not at all); a root per folder
+(per-folder grants and priorities); verifiable state kept apart from
+machine-local bookkeeping; changes pushed to subscribers, never polled.
 
 ## Security
 
@@ -133,6 +160,11 @@ compromised cannot return corrupted data unnoticed.
 - **Reboot gap on ext4:** nothing records changes while the watcher is down.
   The reconcile pass bounds the cost; filesystems with generation numbers
   (btrfs) could skip it.
+- **NOMT at rest:** its defaults preallocate ~256 MB and run 3 io_uring workers
+  plus an fsync thread. Sized for ~2 M keys with one worker, do those threads
+  stay asleep when idle? First drowse measurement.
+- **NOMT tree walk:** repair needs node-by-node access to the trie; the public
+  API is built around per-key proofs. May need a small addition upstream.
 - **Async runtime:** drowse avoids one to guarantee zero idle wakeups. iroh needs
   tokio. Whether an idle tokio runtime stays at zero wakeups is a drowse
   measurement, not an assumption.
@@ -140,7 +172,9 @@ compromised cannot return corrupted data unnoticed.
 ## Milestones
 
 1. Core vocabulary, mode policy, coalescing (this commit).
-2. Watcher → journal: fanotify events land in the store; replay instead of rescan.
-3. Two-peer sync over one transport, conflicts in the simulator.
+2. Watcher → journal → NOMT index; replay instead of rescan. Gate: NOMT idle
+   wakeups measured with drowse.
+3. Two-peer sync over one transport: journal cursors, root-compare repair,
+   conflicts in the simulator.
 4. Power layers wired to drowse budgets.
 5. Second transport, then the ZODA archive tier.

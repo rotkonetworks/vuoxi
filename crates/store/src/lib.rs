@@ -2,6 +2,7 @@
 //!
 //! The journal is append-only and is the reason vuoxi never rescans: every
 //! change the watcher saw is here, so a restart replays the journal instead of
-//! walking the tree. Backed by commonware `storage::journal`.
+//! walking the tree. Journal on commonware `storage::journal`; the manifest
+//! index on NOMT, whose Merkle root doubles as the folder state peers compare.
 
 #![forbid(unsafe_code)]
