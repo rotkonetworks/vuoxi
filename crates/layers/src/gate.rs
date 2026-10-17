@@ -113,54 +113,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::future::{Ready, ready};
-    use std::task::Waker;
-    use vuoxi_core::{Manifest, PathId, PeerId, VersionVector};
-
-    /// Counts the calls that got through.
-    struct Counter(usize);
-
-    impl Service<Request> for Counter {
-        type Response = Response;
-        type Error = Error;
-        type Future = Ready<Result<Response, Error>>;
-
-        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn call(&mut self, _: Request) -> Self::Future {
-            self.0 += 1;
-            ready(Ok(Response::Done))
-        }
-    }
-
-    fn run<S: Service<Request, Response = Response, Error = Error>>(
-        s: &mut S,
-        r: Request,
-    ) -> Response {
-        let mut cx = Context::from_waker(Waker::noop());
-        let fut = s.call(r);
-        let mut fut = std::pin::pin!(fut);
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(r) => r.unwrap(),
-            Poll::Pending => panic!("test services are always ready"),
-        }
-    }
-
-    fn offer() -> Request {
-        let m = Manifest {
-            path: PathId(1),
-            version: VersionVector::new(),
-            chunks: vec![],
-        };
-        Request::Offer(PeerId([0; 32]), m)
-    }
+    use crate::testutil::{Counter, offer, run};
+    use vuoxi_core::PathId;
 
     #[test]
     fn gate_follows_the_mode() {
         let mode = ModeHandle::new(Mode::Live);
-        let mut svc = ModeGateLayer::new(mode.clone()).layer(Counter(0));
+        let count = Counter::default();
+        let mut svc = ModeGateLayer::new(mode.clone()).layer(count.clone());
 
         assert_eq!(run(&mut svc, Request::Changed(PathId(1))), Response::Done);
 
@@ -174,6 +134,6 @@ mod tests {
         mode.set(Mode::Hold);
         assert_eq!(run(&mut svc, offer()), Response::Deferred);
 
-        assert_eq!(svc.inner.0, 2, "deferred requests never reach the engine");
+        assert_eq!(count.calls(), 2, "deferred requests never reach the engine");
     }
 }
