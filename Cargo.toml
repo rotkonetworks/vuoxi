@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/api",
+    "crates/chunk",
     "crates/layers",
     "crates/watcher",
     "crates/store",
@@ -28,6 +29,9 @@ serde_json = "1"
 schemars = "1"
 vuoxi-core = { path = "crates/core" }
 vuoxi-layers = { path = "crates/layers" }
+vuoxi-chunk = { path = "crates/chunk" }
+fastcdc = "5"
+blake3 = "1"
 
 [profile.release]
 lto = true
