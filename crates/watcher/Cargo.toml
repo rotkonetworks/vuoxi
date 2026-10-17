@@ -1,0 +1,11 @@
+[package]
+name = "vuoxi-watcher"
+description = "Privileged change detector: fanotify in, opaque events out, nothing else"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vuoxi-core.workspace = true

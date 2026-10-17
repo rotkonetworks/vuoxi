@@ -1,0 +1,12 @@
+[package]
+name = "vuoxi-sim"
+description = "Deterministic scenario tests: partitions, crashes, concurrent edits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vuoxi-core.workspace = true
+vuoxi-layers.workspace = true

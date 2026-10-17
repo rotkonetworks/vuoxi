@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/layers",
+    "crates/watcher",
+    "crates/store",
+    "crates/archive",
+    "crates/transport-iroh",
+    "crates/transport-commonware",
+    "crates/sim",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rotkonetworks/vuoxi"
+
+[workspace.dependencies]
+tower-service = "0.3"
+tower-layer = "0.3"
+pin-project-lite = "0.2"
+vuoxi-core = { path = "crates/core" }
+vuoxi-layers = { path = "crates/layers" }
+
+[profile.release]
+lto = true
+codegen-units = 1

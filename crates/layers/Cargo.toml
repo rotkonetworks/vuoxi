@@ -1,0 +1,14 @@
+[package]
+name = "vuoxi-layers"
+description = "Policy as tower layers: power modes, coalescing, wake budgets, thermal deferral"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vuoxi-core.workspace = true
+tower-service.workspace = true
+tower-layer.workspace = true
+pin-project-lite.workspace = true

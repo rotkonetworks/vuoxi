@@ -1,0 +1,12 @@
+[package]
+name = "vuoxi-core"
+description = "Vocabulary and seams of vuoxi: requests, identities, version vectors, service traits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tower-service.workspace = true
+tower-layer.workspace = true
