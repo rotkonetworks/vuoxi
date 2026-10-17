@@ -9,3 +9,5 @@ repository.workspace = true
 
 [dependencies]
 vuoxi-core.workspace = true
+nomt.workspace = true
+blake3.workspace = true

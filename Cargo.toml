@@ -31,6 +31,7 @@ vuoxi-core = { path = "crates/core" }
 vuoxi-layers = { path = "crates/layers" }
 vuoxi-chunk = { path = "crates/chunk" }
 fastcdc = "5"
+nomt = "1.0.5"
 blake3 = "1"
 
 [profile.release]
