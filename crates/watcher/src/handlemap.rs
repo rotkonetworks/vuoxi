@@ -219,9 +219,7 @@ impl HandleMap {
             }
             Kind::MovedTo => {
                 // moved in from outside the root (or an unpaired half)
-                if !is_dir {
-                    out.push(Resolved::Changed { rel, is_dir });
-                } else if self.adopt(rec, &rel, skip) {
+                if !is_dir || self.adopt(rec, &rel, skip) {
                     out.push(Resolved::Changed { rel, is_dir });
                 } else {
                     out.push(Resolved::Outside);
