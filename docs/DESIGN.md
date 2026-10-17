@@ -175,6 +175,25 @@ Signals: `.git`, `Cargo.toml`, `package.json` → `code`; KeePass databases,
 weak signals ask rather than guess. A `secrets` signal inside a `code` folder
 (a stray `.env`, a key) is surfaced, never synced to relays by accident.
 
+**Nested tags.** A subdirectory may carry its own tag; how settings combine
+depends on what they protect:
+
+- **Ordinary settings, nearest wins:** priority, chunking, skip rules, history.
+  `code` at the top, `photos` in `site/photos`, each gets its own defaults.
+- **Safety settings only tighten downward:** relays, agent access, share links.
+  A subtree can be more private than its parent, never less: everything under
+  `secrets` stays off relays and out of agents' reach even if a deeper `.vuoxi`
+  says `tag = "code"`. Loosening takes an explicit `unseal = ["relays"]`, which
+  `vuoxi why` and `vuoxi status` always show.
+- **Secret-looking files are tagged per file.** `.env`, private keys, KeePass
+  databases are `secrets` wherever they sit, including inside `code`.
+- **Detection runs per subdirectory** and proposes overrides only where the
+  signals clearly differ: "code; 2 subfolders look different: `vault` →
+  secrets, `site/photos` → photos".
+- **Resolved once per directory.** The effective tag is cached under the
+  directory handle the watcher already reports, so an event costs one lookup,
+  not a walk to the root. `vuoxi why <path>` prints the whole chain.
+
 **Tags are also a vocabulary for agents and sharing.** An agent capability can
 say "read `code`, nothing tagged `secrets`" without listing paths, and a share
 link refuses any path under a `secrets` tag unless it is explicitly granted.
