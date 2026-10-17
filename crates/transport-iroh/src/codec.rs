@@ -8,7 +8,7 @@
 //! Offer    = 1  manifest
 //! Want     = 2  chunk_id:[u8;32]
 //! Chunk    = 3  chunk_id:[u8;32]  data (rest of body)
-//! Pull     = 4  epoch:u64 since:u64 limit:u32
+//! Pull     = 4  folder_len:u8 folder:utf8 epoch:u64 since:u64 limit:u32
 //! Batch    = 5  epoch:u64 head:u64 n:u32 manifest*n
 //! manifest = path:u64  rel_len:u32 rel:utf8  size:u64 mode:u32 mtime_ns:i64
 //!            deleted:u8  n_vv:u32 (peer:[u8;32] counter:u64)*n_vv
@@ -35,6 +35,7 @@ pub enum CodecError {
     BadTag(u8),
     BadPath,
     BadFlag,
+    BadFolder,
 }
 
 impl std::fmt::Display for CodecError {
@@ -46,6 +47,7 @@ impl std::fmt::Display for CodecError {
             Self::BadTag(t) => write!(f, "unknown message tag {t}"),
             Self::BadPath => f.write_str("invalid relative path"),
             Self::BadFlag => f.write_str("invalid tombstone flag"),
+            Self::BadFolder => f.write_str("invalid folder id"),
         }
     }
 }
@@ -70,11 +72,18 @@ pub fn encode_frame(msg: &Wire) -> Result<Vec<u8>, CodecError> {
             body.extend_from_slice(data);
         }
         Wire::Pull {
+            folder,
             epoch,
             since,
             limit,
         } => {
             body.push(4);
+            let f = folder.as_bytes();
+            if f.len() > u8::MAX as usize {
+                return Err(CodecError::BadFolder);
+            }
+            body.push(f.len() as u8);
+            body.extend_from_slice(f);
             body.extend_from_slice(&epoch.to_le_bytes());
             body.extend_from_slice(&since.to_le_bytes());
             body.extend_from_slice(&limit.to_le_bytes());
@@ -125,11 +134,18 @@ fn decode_body(body: &[u8]) -> Result<Wire, CodecError> {
             let id = ChunkId(r.array()?);
             Wire::Chunk(id, std::mem::take(&mut r.0).to_vec())
         }
-        4 => Wire::Pull {
-            epoch: r.u64()?,
-            since: r.u64()?,
-            limit: r.u32()?,
-        },
+        4 => {
+            let n = r.u8()? as usize;
+            let folder = std::str::from_utf8(r.take(n)?)
+                .map_err(|_| CodecError::BadFolder)?
+                .to_owned();
+            Wire::Pull {
+                folder,
+                epoch: r.u64()?,
+                since: r.u64()?,
+                limit: r.u32()?,
+            }
+        }
         5 => {
             let (epoch, head) = (r.u64()?, r.u64()?);
             let n = r.count(MIN_MANIFEST)?;
@@ -287,6 +303,7 @@ mod tests {
             chunks: vec![],
         }));
         roundtrip(Wire::Pull {
+            folder: "notes".into(),
             epoch: 9,
             since: 41,
             limit: 500,

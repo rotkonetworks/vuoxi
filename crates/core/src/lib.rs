@@ -122,9 +122,10 @@ pub enum Wire {
     Offer(Manifest),
     Want(ChunkId),
     Chunk(ChunkId, Vec<u8>),
-    /// Ask for the sender's journal after `since`. `epoch` names the journal the
-    /// cursor belongs to; a mismatch means the cursor is meaningless.
+    /// Ask for the sender's journal of `folder` after `since`. `epoch` names the
+    /// journal the cursor belongs to; a mismatch means the cursor is meaningless.
     Pull {
+        folder: String,
         epoch: u64,
         since: u64,
         limit: u32,
