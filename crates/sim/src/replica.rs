@@ -16,7 +16,9 @@
 //!    mid-transfer repeats work instead of skipping it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use vuoxi_core::{Causality, ChunkId, Manifest, PathId, PeerId, Response, VersionVector};
+use vuoxi_core::{
+    Causality, ChunkId, Manifest, Meta, PathId, PeerId, RelPath, Response, VersionVector,
+};
 
 /// One journal line. The sequence number is its position (1-based).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,6 +143,8 @@ impl Replica {
         version.bump(self.id);
         let m = Manifest {
             path,
+            rel: RelPath::new(&format!("p{:016x}", path.0)).expect("valid"),
+            meta: Meta::default(),
             chunks: vec![chunk_for(path, self.id, version.get(&self.id))],
             version,
         };

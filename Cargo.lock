@@ -4086,6 +4086,7 @@ dependencies = [
 name = "vuoxi-core"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "tower-layer",
  "tower-service",
 ]

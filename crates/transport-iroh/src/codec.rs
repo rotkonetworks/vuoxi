@@ -8,14 +8,21 @@
 //! Offer    = 1  manifest
 //! Want     = 2  chunk_id:[u8;32]
 //! Chunk    = 3  chunk_id:[u8;32]  data (rest of body)
-//! manifest = path:u64  n_vv:u32 (peer:[u8;32] counter:u64)*n_vv
+//! Pull     = 4  epoch:u64 since:u64 limit:u32
+//! Batch    = 5  epoch:u64 head:u64 n:u32 manifest*n
+//! manifest = path:u64  rel_len:u32 rel:utf8  size:u64 mode:u32 mtime_ns:i64
+//!            deleted:u8  n_vv:u32 (peer:[u8;32] counter:u64)*n_vv
 //!            n_chunks:u32 (chunk_id:[u8;32])*n_chunks
 //! ```
 //!
 //! Counts are validated against the bytes actually present before anything is
-//! allocated, so a hostile length cannot reserve memory.
+//! allocated, so a hostile length cannot reserve memory. Paths are re-validated
+//! as [`RelPath`]s, so a peer cannot name a file outside the folder.
 
-use vuoxi_core::{ChunkId, Manifest, PathId, PeerId, VersionVector, Wire};
+use vuoxi_core::{ChunkId, Manifest, Meta, PathId, PeerId, RelPath, VersionVector, Wire};
+
+/// Smallest encoded manifest, for bounding counts.
+const MIN_MANIFEST: usize = 8 + 4 + 1 + 8 + 4 + 8 + 1 + 4 + 4;
 
 /// Largest accepted frame body (tag included). A chunk plus its header must fit.
 pub const MAX_FRAME: usize = 4 << 20;
@@ -26,6 +33,8 @@ pub enum CodecError {
     Truncated,
     Trailing,
     BadTag(u8),
+    BadPath,
+    BadFlag,
 }
 
 impl std::fmt::Display for CodecError {
@@ -35,6 +44,8 @@ impl std::fmt::Display for CodecError {
             Self::Truncated => f.write_str("truncated message"),
             Self::Trailing => f.write_str("trailing bytes after message"),
             Self::BadTag(t) => write!(f, "unknown message tag {t}"),
+            Self::BadPath => f.write_str("invalid relative path"),
+            Self::BadFlag => f.write_str("invalid tombstone flag"),
         }
     }
 }
@@ -57,6 +68,29 @@ pub fn encode_frame(msg: &Wire) -> Result<Vec<u8>, CodecError> {
             body.push(3);
             body.extend_from_slice(&c.0);
             body.extend_from_slice(data);
+        }
+        Wire::Pull {
+            epoch,
+            since,
+            limit,
+        } => {
+            body.push(4);
+            body.extend_from_slice(&epoch.to_le_bytes());
+            body.extend_from_slice(&since.to_le_bytes());
+            body.extend_from_slice(&limit.to_le_bytes());
+        }
+        Wire::Batch {
+            epoch,
+            head,
+            manifests,
+        } => {
+            body.push(5);
+            body.extend_from_slice(&epoch.to_le_bytes());
+            body.extend_from_slice(&head.to_le_bytes());
+            body.extend_from_slice(&(manifests.len() as u32).to_le_bytes());
+            for m in manifests {
+                put_manifest(&mut body, m);
+            }
         }
     }
     if body.len() > MAX_FRAME {
@@ -91,6 +125,24 @@ fn decode_body(body: &[u8]) -> Result<Wire, CodecError> {
             let id = ChunkId(r.array()?);
             Wire::Chunk(id, std::mem::take(&mut r.0).to_vec())
         }
+        4 => Wire::Pull {
+            epoch: r.u64()?,
+            since: r.u64()?,
+            limit: r.u32()?,
+        },
+        5 => {
+            let (epoch, head) = (r.u64()?, r.u64()?);
+            let n = r.count(MIN_MANIFEST)?;
+            let mut manifests = Vec::with_capacity(n);
+            for _ in 0..n {
+                manifests.push(r.manifest()?);
+            }
+            Wire::Batch {
+                epoch,
+                head,
+                manifests,
+            }
+        }
         t => return Err(CodecError::BadTag(t)),
     };
     if r.0.is_empty() {
@@ -102,6 +154,13 @@ fn decode_body(body: &[u8]) -> Result<Wire, CodecError> {
 
 fn put_manifest(out: &mut Vec<u8>, m: &Manifest) {
     out.extend_from_slice(&m.path.0.to_le_bytes());
+    let rel = m.rel.as_str().as_bytes();
+    out.extend_from_slice(&(rel.len() as u32).to_le_bytes());
+    out.extend_from_slice(rel);
+    out.extend_from_slice(&m.meta.size.to_le_bytes());
+    out.extend_from_slice(&m.meta.mode.to_le_bytes());
+    out.extend_from_slice(&m.meta.mtime_ns.to_le_bytes());
+    out.push(u8::from(m.meta.deleted));
     let entries = vv_entries(&m.version);
     out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for (p, n) in entries {
@@ -144,6 +203,19 @@ impl Reader<'_> {
     }
     fn manifest(&mut self) -> Result<Manifest, CodecError> {
         let path = PathId(self.u64()?);
+        let n = self.count(1)?;
+        let rel = std::str::from_utf8(self.take(n)?).map_err(|_| CodecError::BadPath)?;
+        let rel = RelPath::new(rel).map_err(|_| CodecError::BadPath)?;
+        let meta = Meta {
+            size: self.u64()?,
+            mode: self.u32()?,
+            mtime_ns: self.u64()? as i64,
+            deleted: match self.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(CodecError::BadFlag),
+            },
+        };
         let n = self.count(40)?;
         let mut entries = Vec::with_capacity(n);
         for _ in 0..n {
@@ -156,7 +228,9 @@ impl Reader<'_> {
         }
         Ok(Manifest {
             path,
+            rel,
             version: vv_from_entries(&entries)?,
+            meta,
             chunks,
         })
     }
@@ -182,7 +256,14 @@ mod tests {
         version.bump(b);
         Manifest {
             path: PathId(u64::MAX - 7),
+            rel: RelPath::new("docs/ä.md").unwrap(),
             version,
+            meta: Meta {
+                size: 123,
+                mode: 0o600,
+                mtime_ns: -5,
+                deleted: false,
+            },
             chunks: vec![ChunkId([9; 32]), ChunkId([0; 32])],
         }
     }
@@ -197,9 +278,29 @@ mod tests {
         roundtrip(Wire::Offer(manifest()));
         roundtrip(Wire::Offer(Manifest {
             path: PathId(0),
+            rel: RelPath::new("x").unwrap(),
             version: VersionVector::new(),
+            meta: Meta {
+                deleted: true,
+                ..Meta::default()
+            },
             chunks: vec![],
         }));
+        roundtrip(Wire::Pull {
+            epoch: 9,
+            since: 41,
+            limit: 500,
+        });
+        roundtrip(Wire::Batch {
+            epoch: 9,
+            head: 44,
+            manifests: vec![manifest(), manifest()],
+        });
+        roundtrip(Wire::Batch {
+            epoch: 1,
+            head: 0,
+            manifests: vec![],
+        });
         roundtrip(Wire::Want(ChunkId([7; 32])));
         roundtrip(Wire::Chunk(ChunkId([7; 32]), vec![]));
         roundtrip(Wire::Chunk(ChunkId([7; 32]), (0..=255).collect()));
@@ -237,13 +338,23 @@ mod tests {
         long.push(0);
         assert_eq!(decode_frame(&long), Err(CodecError::Trailing));
         assert_eq!(decode_frame(&[0, 0, 0, 1, 9]), Err(CodecError::BadTag(9)));
-        // claims a million chunks, carries none
-        let mut body = vec![1u8];
+        // a batch claiming a million manifests, carrying none
+        let mut body = vec![5u8];
         body.extend_from_slice(&0u64.to_le_bytes());
-        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&0u64.to_le_bytes());
         body.extend_from_slice(&1_000_000u32.to_le_bytes());
         let mut f = (body.len() as u32).to_be_bytes().to_vec();
         f.extend(body);
         assert_eq!(decode_frame(&f), Err(CodecError::Truncated));
+    }
+
+    #[test]
+    fn rejects_path_escape() {
+        let mut m = manifest();
+        m.rel = RelPath::new("ab/cd").unwrap();
+        let mut f = encode_frame(&Wire::Offer(m)).unwrap();
+        let at = f.windows(5).position(|w| w == b"ab/cd").unwrap();
+        f[at..at + 5].copy_from_slice(b"../cd");
+        assert_eq!(decode_frame(&f), Err(CodecError::BadPath));
     }
 }

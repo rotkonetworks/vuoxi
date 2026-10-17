@@ -10,3 +10,4 @@ repository.workspace = true
 [dependencies]
 tower-service.workspace = true
 tower-layer.workspace = true
+blake3.workspace = true

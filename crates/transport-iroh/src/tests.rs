@@ -1,5 +1,5 @@
 use super::*;
-use vuoxi_core::{ChunkId, Manifest, PathId, VersionVector};
+use vuoxi_core::{ChunkId, Manifest, Meta, PathId, RelPath, VersionVector};
 
 #[derive(Clone)]
 struct Echoer;
@@ -15,7 +15,12 @@ impl Service<(PeerId, Wire)> for Echoer {
         std::future::ready(Ok(match w {
             Wire::Offer(_) => None,
             Wire::Want(c) => Some(Wire::Chunk(c, vec![c.0[0]; 100_000])),
-            Wire::Chunk(..) => None,
+            Wire::Pull { epoch, since, .. } => Some(Wire::Batch {
+                epoch,
+                head: since,
+                manifests: vec![],
+            }),
+            Wire::Chunk(..) | Wire::Batch { .. } => None,
         }))
     }
 }
@@ -48,7 +53,9 @@ async fn loopback_offer_want_chunk() {
     version.bump(a.peer_id());
     let offer = Wire::Offer(Manifest {
         path: PathId(5),
+        rel: RelPath::new("five").unwrap(),
         version,
+        meta: Meta::default(),
         chunks: vec![ChunkId([3; 32])],
     });
     let mut a2 = a.clone();

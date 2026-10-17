@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use tower_service::Service;
-use vuoxi_core::{Error, Manifest, PathId, PeerId, Request, Response, VersionVector};
+use vuoxi_core::{
+    Error, Manifest, Meta, PathId, PeerId, RelPath, Request, Response, VersionVector,
+};
 
 /// Counts the calls that got through; clones share the count.
 #[derive(Clone, Default)]
@@ -49,7 +51,9 @@ pub fn run<S: Service<Request, Response = Response, Error = Error>>(
 pub fn offer() -> Request {
     let m = Manifest {
         path: PathId(1),
+        rel: RelPath::new("one").unwrap(),
         version: VersionVector::new(),
+        meta: Meta::default(),
         chunks: vec![],
     };
     Request::Offer(PeerId([0; 32]), m)

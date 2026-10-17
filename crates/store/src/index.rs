@@ -87,14 +87,16 @@ impl Index {
 mod tests {
     use super::*;
     use crate::testdir;
-    use vuoxi_core::{ChunkId, PeerId, VersionVector};
+    use vuoxi_core::{ChunkId, Meta, PeerId, RelPath, VersionVector};
 
     fn m(path: u64, tag: u8) -> Manifest {
         let mut version = VersionVector::new();
         version.bump(PeerId([tag; 32]));
         Manifest {
             path: PathId(path),
+            rel: RelPath::new(&format!("f{path}")).unwrap(),
             version,
+            meta: Meta::default(),
             chunks: vec![ChunkId([tag; 32])],
         }
     }
