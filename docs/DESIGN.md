@@ -138,6 +138,47 @@ events before they cross the socket. A `cargo build` writing thousands of files
 into `target/` costs nothing beyond the kernel. A new `target/` is recognised
 the moment cargo writes its `CACHEDIR.TAG`.
 
+## Tags: what a folder is
+
+A folder carries one tag that sets its defaults, so the common case needs no
+`.vuoxi` file. Subdirectories may override (`tag = "secrets"` in a `.vuoxi`),
+and any single default can be overridden by name.
+
+| tag | skip rules | `.gitignore` | priority | relays | agents | conflicts | history |
+|---|---|---|---|---|---|---|---|
+| `code` | build outputs (CACHEDIR.TAG, manifest table) | not an exclusion list | normal | yes | read | keep both | short |
+| `secrets` | none | ignored entirely | urgent | **never**; own devices only | **none** unless granted | keep both, alert | long |
+| `photos` | thumbnails, caches | n/a | bulk (mains) | yes | none | write-once, no merge | forever |
+| `media` | caches | n/a | bulk (mains) | yes | none | write-once | none |
+| `notes` | editor swap files | n/a | urgent | yes | read | keep both | long |
+| `archive` | none | n/a | bulk | archive tier (ZODA) | none | none, append-only | forever |
+
+The `.gitignore` policy is itself a setting, `gitignore = "keep" | "exclude" |
+"ask"`, defaulting per tag as above.
+
+**Chunking follows the tag.** `code`, `notes` and `secrets` use content-defined
+chunks (small edits, small transfers). `photos` and `media` hash whole files:
+they are written once, and CDC would only cost CPU.
+
+**Detected, then confirmed.** When a folder is added, vuoxi samples it and
+proposes a tag instead of applying one silently:
+
+```
+$ vuoxi add ~/code
+detected: code (382 git repos, 55 cargo target dirs, 265 GB rebuildable)
+tag as code? [Y/n]
+```
+
+Signals: `.git`, `Cargo.toml`, `package.json` → `code`; KeePass databases,
+`.age`/`.gpg` files, SSH keys → `secrets`; `DCIM/`, dense JPEG/HEIC/RAW →
+`photos`; video containers → `media`; mostly Markdown/text → `notes`. Mixed or
+weak signals ask rather than guess. A `secrets` signal inside a `code` folder
+(a stray `.env`, a key) is surfaced, never synced to relays by accident.
+
+**Tags are also a vocabulary for agents and sharing.** An agent capability can
+say "read `code`, nothing tagged `secrets`" without listing paths, and a share
+link refuses any path under a `secrets` tag unless it is explicitly granted.
+
 ## Storage and reconciliation
 
 ```
