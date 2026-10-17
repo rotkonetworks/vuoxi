@@ -11,6 +11,7 @@ usage: vuoxi [--json] [--socket PATH] [--config PATH] [--fields a,b] <command>
   apply PLAN                        enact a plan
   revert PLAN                       undo an applied plan
   run                               run the sync engine for the configured folders
+  why PATH                          which rule decides whether PATH syncs
   daemon [--read-only]              serve the socket (fake state for now)
   mcp-serve                         MCP over stdio (not implemented yet)
   init                              create device key and config; print the id
@@ -32,6 +33,7 @@ pub enum Cmd {
     Revert(String),
     Daemon,
     Run,
+    Why(PathBuf),
     McpServe,
     Init,
     Id,
@@ -73,6 +75,9 @@ pub fn command_help(cmd: &str) -> Option<&'static str> {
         "plan" => "vuoxi plan [FOLDER]: print a plan id and its effect (files, bytes, peers)",
         "apply" => "vuoxi apply PLAN: enact a pending plan",
         "revert" => "vuoxi revert PLAN: roll back an applied plan (newest first)",
+        "why" => {
+            "vuoxi why PATH [--config PATH]: sync or skip, the rule that decided, the tag chain"
+        }
         "run" => {
             "vuoxi run [--config PATH]: sync the configured folders with their peers until stopped.\n\
              Changes come from the watcher socket in the config; without one, folders are\n\
@@ -166,7 +171,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
     }
     let local = matches!(
         name.as_str(),
-        "init" | "id" | "pair" | "folder" | "config" | "run"
+        "init" | "id" | "pair" | "folder" | "config" | "run" | "why"
     );
     if o.config.is_some() && !local {
         return Err(format!("--config does not apply to {name}"));
@@ -214,6 +219,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
         "run" => {
             arity(0, 0, "no arguments")?;
             Cmd::Run
+        }
+        "why" => {
+            arity(1, 1, "PATH")?;
+            Cmd::Why(rest[0].clone().into())
         }
         "init" => {
             arity(0, 0, "no arguments")?;

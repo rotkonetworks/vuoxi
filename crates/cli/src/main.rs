@@ -7,6 +7,7 @@ mod args;
 mod local;
 mod render;
 mod run;
+mod why;
 
 use args::{Cmd, Opts, USAGE};
 use serde_json::{Value, json};
@@ -49,6 +50,7 @@ fn run() -> i32 {
         }
         Cmd::Daemon => return daemon(&socket, o.read_only),
         Cmd::Run => return run::run(&o),
+        Cmd::Why(p) => return why::run(&p, &o, want_json(&o)),
         Cmd::Init
         | Cmd::Id
         | Cmd::Pair { .. }
