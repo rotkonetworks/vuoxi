@@ -1,10 +1,9 @@
 //! Per-device append-only change log.
 //!
-//! // TODO: commonware journal. `commonware-storage`'s journal needs the
-//! commonware async runtime, which would add an always-on executor to a daemon
-//! whose goal is zero idle wakeups. Until that is measured, this is a small
-//! file journal with the same contract: numbered records, durable on commit,
-//! torn tail repaired on open.
+//! A small file journal rather than `commonware-storage`'s: that one needs the
+//! commonware async runtime, an always-on executor in a daemon whose goal is
+//! zero idle wakeups. Contract: numbered records, durable on commit, torn tail
+//! repaired on open.
 //!
 //! Layout: fixed 20-byte records, no header, record `n` (1-based) at byte
 //! `(n - 1) * 20`:

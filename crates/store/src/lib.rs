@@ -4,7 +4,7 @@
 //! change the watcher saw is here, so a restart replays the journal instead of
 //! walking the tree. The manifest index is on NOMT, whose Merkle root doubles as
 //! the folder state peers compare. The journal is a small file journal for now
-//! (see [`journal`] for why not commonware's yet).
+//! (see [`journal`] for why not commonware's).
 
 #![forbid(unsafe_code)]
 

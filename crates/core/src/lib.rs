@@ -27,7 +27,7 @@ pub struct ChunkId(pub [u8; 32]);
 pub struct PeerId(pub [u8; 32]);
 
 /// What one device believes a file is: its causal history and its chunks.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Manifest {
     pub path: PathId,
     pub version: VersionVector,

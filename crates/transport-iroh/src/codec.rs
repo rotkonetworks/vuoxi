@@ -26,8 +26,6 @@ pub enum CodecError {
     Truncated,
     Trailing,
     BadTag(u8),
-    /// Version-vector counter too large to rebuild; see `vv_from_entries`.
-    Counter(u64),
 }
 
 impl std::fmt::Display for CodecError {
@@ -37,7 +35,6 @@ impl std::fmt::Display for CodecError {
             Self::Truncated => f.write_str("truncated message"),
             Self::Trailing => f.write_str("trailing bytes after message"),
             Self::BadTag(t) => write!(f, "unknown message tag {t}"),
-            Self::Counter(n) => write!(f, "version counter {n} unsupported"),
         }
     }
 }
@@ -165,41 +162,12 @@ impl Reader<'_> {
     }
 }
 
-// core: needs `VersionVector::iter() -> impl Iterator<Item = (PeerId, u64)>` and
-// `VersionVector::from_entries(impl IntoIterator<Item = (PeerId, u64)>)`. Core exposes
-// neither, so these two shims work around it and should be deleted once it does.
-
-/// Read entries out of the derived `Debug` form: `VersionVector({PeerId([..]): n, ..})`.
 fn vv_entries(v: &VersionVector) -> Vec<(PeerId, u64)> {
-    let s = format!("{v:?}");
-    let mut out = Vec::new();
-    for part in s.split("PeerId([").skip(1) {
-        let (bytes, rest) = part.split_once("])").expect("derived Debug shape");
-        let mut id = [0u8; 32];
-        for (slot, b) in id.iter_mut().zip(bytes.split(", ")) {
-            *slot = b.parse().expect("u8");
-        }
-        let n = rest.trim_start_matches(':').trim();
-        let n = n.split([',', '}']).next().unwrap_or("0").trim();
-        out.push((PeerId(id), n.parse().expect("u64")));
-    }
-    out
+    v.iter().collect()
 }
 
-/// Rebuild by repeated `bump`, so counters are capped to keep a hostile peer
-/// from burning CPU.
 fn vv_from_entries(entries: &[(PeerId, u64)]) -> Result<VersionVector, CodecError> {
-    const MAX_COUNTER: u64 = 1 << 16;
-    let mut v = VersionVector::new();
-    for &(p, n) in entries {
-        if n > MAX_COUNTER {
-            return Err(CodecError::Counter(n));
-        }
-        for _ in 0..n {
-            v.bump(p);
-        }
-    }
-    Ok(v)
+    Ok(entries.iter().copied().collect())
 }
 
 #[cfg(test)]

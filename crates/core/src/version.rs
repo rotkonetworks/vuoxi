@@ -13,7 +13,7 @@ pub enum Causality {
 }
 
 /// Per-device edit counters. Sparse: a device that never edited is absent.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VersionVector(BTreeMap<PeerId, u64>);
 
 impl VersionVector {
@@ -24,6 +24,11 @@ impl VersionVector {
     /// Record one local edit by `peer`.
     pub fn bump(&mut self, peer: PeerId) {
         *self.0.entry(peer).or_default() += 1;
+    }
+
+    /// Non-zero counters, ascending by peer.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (PeerId, u64)> + '_ {
+        self.0.iter().map(|(p, n)| (*p, *n))
     }
 
     pub fn get(&self, peer: &PeerId) -> u64 {
@@ -51,6 +56,18 @@ impl VersionVector {
             (false, true) => Causality::Ahead,
             (true, true) => Causality::Concurrent,
         }
+    }
+}
+
+/// Rebuild from stored entries; zero counters are dropped, repeated peers keep the max.
+impl FromIterator<(PeerId, u64)> for VersionVector {
+    fn from_iter<I: IntoIterator<Item = (PeerId, u64)>>(it: I) -> Self {
+        let mut v = Self::new();
+        for (p, n) in it.into_iter().filter(|(_, n)| *n > 0) {
+            let e = v.0.entry(p).or_default();
+            *e = (*e).max(n);
+        }
+        v
     }
 }
 
@@ -82,5 +99,20 @@ mod tests {
         a.merge(&b);
         assert_eq!(a.compare(&b), Causality::Ahead);
         assert_eq!(b.compare(&a), Causality::Behind);
+    }
+
+    #[test]
+    fn entries_round_trip() {
+        let mut a = VersionVector::new();
+        a.bump(B);
+        a.bump(A);
+        a.bump(B);
+        let es: Vec<_> = a.iter().collect();
+        assert_eq!(es, vec![(A, 1), (B, 2)]);
+        assert_eq!(es.into_iter().collect::<VersionVector>(), a);
+        assert_eq!(
+            [(A, 0)].into_iter().collect::<VersionVector>(),
+            VersionVector::new()
+        );
     }
 }

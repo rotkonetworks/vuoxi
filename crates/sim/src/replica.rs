@@ -42,7 +42,7 @@ pub struct Replica {
     /// One entry is the normal case; more than one is a conflict. `[0]` is the
     /// deterministic "visible" version, so replicas that hold the same set
     /// show the same file.
-    // core: needs `Ord` on `VersionVector`/`Manifest` (sorting by chunks stands in).
+    // TODO: sort by the `Ord` core now derives on `VersionVector`/`Manifest`.
     heads: BTreeMap<PathId, Vec<Manifest>>,
     journal: Vec<Entry>,
     conflicts: Vec<(Manifest, Manifest)>,

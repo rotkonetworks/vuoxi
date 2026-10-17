@@ -16,48 +16,12 @@ fn bad(msg: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-// core: needs `VersionVector::iter() -> impl Iterator<Item = (PeerId, u64)>` and
-// `FromIterator<(PeerId, u64)>`. Until then the entries are read back out of the
-// derived `Debug` output (`VersionVector({PeerId([1, 2, ..]): 3})`, ascending by
-// peer) and rebuilt with `bump`. The test `debug_shim_format` pins the format,
-// so a core change breaks loudly instead of corrupting the index.
 fn entries(v: &VersionVector) -> Vec<(PeerId, u64)> {
-    let s = format!("{v:?}");
-    let mut nums = Vec::new();
-    let mut cur: Option<u64> = None;
-    for c in s.chars() {
-        match c.to_digit(10) {
-            Some(d) => cur = Some(cur.unwrap_or(0) * 10 + u64::from(d)),
-            None => nums.extend(cur.take()),
-        }
-    }
-    nums.as_chunks::<33>()
-        .0
-        .iter()
-        .map(|e| {
-            let mut p = [0u8; 32];
-            for (b, n) in p.iter_mut().zip(e) {
-                *b = *n as u8;
-            }
-            (PeerId(p), e[32])
-        })
-        .collect()
+    v.iter().collect()
 }
 
-/// Counters above this cannot be rebuilt through `bump` and are refused.
-const MAX_SHIM_COUNT: u64 = 1 << 20;
-
 fn rebuild(es: &[(PeerId, u64)]) -> io::Result<VersionVector> {
-    let mut v = VersionVector::new();
-    for &(p, n) in es {
-        if n > MAX_SHIM_COUNT {
-            return Err(bad("version counter too large for the bump shim"));
-        }
-        for _ in 0..n {
-            v.bump(p);
-        }
-    }
-    Ok(v)
+    Ok(es.iter().copied().collect())
 }
 
 pub fn encode(m: &Manifest) -> io::Result<Vec<u8>> {
@@ -162,12 +126,6 @@ mod tests {
             chunks: vec![],
         };
         assert_eq!(decode(&encode(&empty).unwrap()).unwrap(), empty);
-    }
-
-    #[test]
-    fn debug_shim_format() {
-        let es = entries(&sample(1).version);
-        assert_eq!(es, vec![(PeerId([3; 32]), 2), (PeerId([9; 32]), 1)]);
     }
 
     #[test]

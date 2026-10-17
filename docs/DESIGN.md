@@ -68,7 +68,7 @@ same engine over in-memory fakes and the simulator.
 | `core` | `Request`/`Response`, ids, `VersionVector`, the `Engine`/`Transport`/`Store` seams |
 | `layers` | `ModeGate`, `Coalesce`, power state; `WakeBudget`, `Thermal` next |
 | `watcher` | privileged fanotify helper |
-| `store` | change journal (commonware `storage::journal`) + manifest index (NOMT) |
+| `store` | change journal (checksummed append-only file) + manifest index (NOMT) |
 | `transport-iroh` | QUIC via iroh: the one transport |
 | `archive` | ZODA erasure coding: relay batches (temporary) and the backup tier (durable) |
 | `sim` | deterministic reference model: seeded scheduler, partitions, crashes, concurrent edits |
@@ -99,7 +99,7 @@ drowse already tests its own footprint.
 ## Storage and reconciliation
 
 ```
-journal   per-device change log, numbered 1, 2, 3, …     commonware storage::journal
+journal   per-device change log, numbered 1, 2, 3, …     checksummed append-only file
 index     PathId → Manifest; its root is the folder state  NOMT
 ```
 
