@@ -4092,6 +4092,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "vuoxi-daemon"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "ed25519-dalek 2.2.0",
+ "tokio",
+ "tower-service",
+ "vuoxi-chunk",
+ "vuoxi-core",
+ "vuoxi-layers",
+ "vuoxi-store",
+ "vuoxi-transport-iroh",
+]
+
+[[package]]
 name = "vuoxi-layers"
 version = "0.0.1"
 dependencies = [

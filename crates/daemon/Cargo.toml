@@ -1,0 +1,21 @@
+[package]
+name = "vuoxi-daemon"
+description = "The vuoxi engine: local changes into the journal, journals between peers, chunks into files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vuoxi-core.workspace = true
+vuoxi-store.workspace = true
+vuoxi-chunk.workspace = true
+vuoxi-layers.workspace = true
+vuoxi-transport-iroh.workspace = true
+tower-service.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[dev-dependencies]
+blake3.workspace = true
+ed25519-dalek.workspace = true

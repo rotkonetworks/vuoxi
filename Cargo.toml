@@ -13,6 +13,7 @@ members = [
     "crates/rpc",
     "crates/cli",
     "crates/caps",
+    "crates/daemon",
 ]
 
 [workspace.package]
@@ -34,6 +35,9 @@ tokio = { version = "1", default-features = false }
 vuoxi-core = { path = "crates/core" }
 vuoxi-layers = { path = "crates/layers" }
 vuoxi-chunk = { path = "crates/chunk" }
+vuoxi-store = { path = "crates/store" }
+vuoxi-transport-iroh = { path = "crates/transport-iroh" }
+vuoxi-daemon = { path = "crates/daemon" }
 fastcdc = "5"
 nomt = "1.0.5"
 blake3 = "1"
