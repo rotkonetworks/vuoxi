@@ -42,7 +42,7 @@ run just as hot. vuoxi changes the loop.
             │ seccomp      │                │  ▸ Thermal ▸ Reconciler            │
             └──────────────┘                │        │            │              │
                                             │      Store      Transport ◀──▶ peers
-                                            │    (journal)  (iroh | commonware)  │
+                                            │    (journal)  (QUIC / iroh)       │
                                             │                     │              │
                                             │                  Archive ──▶ hosts │
                                             │                 (ZODA shards)      │
@@ -58,9 +58,8 @@ let engine = ServiceBuilder::new()
     .service(Reconciler::new(store, transport));
 ```
 
-The core is generic over `Store`, `Transport` and `Archive`. Swapping iroh for
-commonware, or plain replicas for ZODA shards, is a type parameter, so we can
-build both and measure instead of deciding in advance.
+The core is generic over `Store`, `Transport` and `Archive`, so tests run the
+same engine over in-memory fakes and the simulator.
 
 ### Crates
 
@@ -70,8 +69,7 @@ build both and measure instead of deciding in advance.
 | `layers` | `ModeGate`, `Coalesce`, power state; `WakeBudget`, `Thermal` next |
 | `watcher` | privileged fanotify helper |
 | `store` | change journal (commonware `storage::journal`) + manifest index (NOMT) |
-| `transport-iroh` | QUIC via iroh, `iroh-blobs` for verified BLAKE3 transfer |
-| `transport-commonware` | `p2p::authenticated` among a fixed set of keyed peers |
+| `transport-iroh` | QUIC via iroh: the one transport |
 | `archive` | ZODA erasure coding: relay batches (temporary) and the backup tier (durable) |
 | `sim` | deterministic scenarios on the commonware runtime |
 
@@ -291,9 +289,12 @@ compromised cannot return corrupted data unnoticed.
 
 ## Open questions
 
-- **Transport:** iroh ships verified blob transfer; commonware brings the
-  deterministic simulator and a peer model that matches a fixed mesh. Both sit
-  behind `Transport`; measure before choosing.
+- **Transport (decided):** QUIC via iroh. It covers the mesh (direct dial,
+  no discovery or relays by default) and the long-term needs (relays for peers
+  off the mesh, sharing with other people). A commonware transport was
+  prototyped and kept on a branch; one transport keeps `core` to one message
+  model. iroh's QUIC keep-alives cannot be disabled on an open connection, so
+  idle connections are closed after a short timeout and redialled on demand.
 - **Reboot gap on ext4:** nothing records changes while the watcher is down.
   The reconcile pass bounds the cost; filesystems with generation numbers
   (btrfs) could skip it.
