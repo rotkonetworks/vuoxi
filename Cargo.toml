@@ -14,7 +14,7 @@ members = [
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rotkonetworks/vuoxi"
 
@@ -22,6 +22,8 @@ repository = "https://github.com/rotkonetworks/vuoxi"
 tower-service = "0.3"
 tower-layer = "0.3"
 pin-project-lite = "0.2"
+iroh = { version = "1.3", default-features = false, features = ["tls-ring"] }
+tokio = { version = "1", default-features = false }
 vuoxi-core = { path = "crates/core" }
 vuoxi-layers = { path = "crates/layers" }
 
