@@ -10,6 +10,7 @@ usage: vuoxi [--json] [--socket PATH] [--config PATH] [--fields a,b] <command>
   plan [FOLDER]                     preview the effect; changes nothing
   apply PLAN                        enact a plan
   revert PLAN                       undo an applied plan
+  run                               run the sync engine for the configured folders
   daemon [--read-only]              serve the socket (fake state for now)
   mcp-serve                         MCP over stdio (not implemented yet)
   init                              create device key and config; print the id
@@ -30,6 +31,7 @@ pub enum Cmd {
     Apply(String),
     Revert(String),
     Daemon,
+    Run,
     McpServe,
     Init,
     Id,
@@ -71,6 +73,11 @@ pub fn command_help(cmd: &str) -> Option<&'static str> {
         "plan" => "vuoxi plan [FOLDER]: print a plan id and its effect (files, bytes, peers)",
         "apply" => "vuoxi apply PLAN: enact a pending plan",
         "revert" => "vuoxi revert PLAN: roll back an applied plan (newest first)",
+        "run" => {
+            "vuoxi run [--config PATH]: sync the configured folders with their peers until stopped.\n\
+             Changes come from the watcher socket in the config; without one, folders are\n\
+             reconciled every VUOXI_POLL_SECS seconds (default 60)"
+        }
         "daemon" => {
             "vuoxi daemon [--read-only] [--socket PATH]: serve fake state; read-only denies plan/apply/revert"
         }
@@ -157,7 +164,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
     if (o.tag.is_some() || !o.peers.is_empty()) && !folder_add {
         return Err("--tag/--peer apply to `folder add` only".into());
     }
-    let local = matches!(name.as_str(), "init" | "id" | "pair" | "folder" | "config");
+    let local = matches!(
+        name.as_str(),
+        "init" | "id" | "pair" | "folder" | "config" | "run"
+    );
     if o.config.is_some() && !local {
         return Err(format!("--config does not apply to {name}"));
     }
@@ -200,6 +210,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
         "mcp-serve" => {
             arity(0, 0, "no arguments")?;
             Cmd::McpServe
+        }
+        "run" => {
+            arity(0, 0, "no arguments")?;
+            Cmd::Run
         }
         "init" => {
             arity(0, 0, "no arguments")?;

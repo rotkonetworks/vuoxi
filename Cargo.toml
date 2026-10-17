@@ -40,6 +40,7 @@ vuoxi-chunk = { path = "crates/chunk" }
 vuoxi-store = { path = "crates/store" }
 vuoxi-transport-iroh = { path = "crates/transport-iroh" }
 vuoxi-daemon = { path = "crates/daemon" }
+vuoxi-watcher = { path = "crates/watcher" }
 fastcdc = "5"
 nomt = "1.0.5"
 blake3 = "1"

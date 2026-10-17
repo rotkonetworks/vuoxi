@@ -4123,8 +4123,12 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
+ "tokio",
  "vuoxi-config",
+ "vuoxi-core",
+ "vuoxi-daemon",
  "vuoxi-rpc",
+ "vuoxi-rules",
 ]
 
 [[package]]
@@ -4191,8 +4195,10 @@ dependencies = [
  "vuoxi-chunk",
  "vuoxi-core",
  "vuoxi-layers",
+ "vuoxi-rules",
  "vuoxi-store",
  "vuoxi-transport-iroh",
+ "vuoxi-watcher",
 ]
 
 [[package]]

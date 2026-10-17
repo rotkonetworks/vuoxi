@@ -5,7 +5,7 @@ Documentation=https://github.com/rotkonetworks/vuoxi
 
 [Service]
 Type=exec
-ExecStart=%h/.local/bin/vuoxi daemon
+ExecStart=%h/.local/bin/vuoxi run
 Restart=on-failure
 RestartSec=5
 # Stay out of the way of interactive work.

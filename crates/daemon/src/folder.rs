@@ -17,6 +17,8 @@ use vuoxi_store::LocalStore;
 pub trait Filter: Send {
     fn skip_dir(&mut self, root: &Path, rel: &RelPath) -> bool;
     fn skip_file(&mut self, root: &Path, rel: &RelPath) -> bool;
+    /// `rel` changed on disk; a filter that caches config (`.vuoxi`) drops it here.
+    fn touched(&mut self, _rel: &RelPath) {}
 }
 
 /// `.git`, cache directories that say so (`CACHEDIR.TAG`), and our own temp files.
@@ -121,6 +123,10 @@ impl Folder {
     /// Is this manifest's path ours? Peers cannot smuggle an id for another folder.
     pub fn owns(&self, m: &Manifest) -> bool {
         PathId::of(&self.id, &m.rel) == m.path
+    }
+
+    pub fn touched(&mut self, rel: &RelPath) {
+        self.filter.touched(rel);
     }
 
     pub fn skip_dir(&mut self, rel: &RelPath) -> bool {

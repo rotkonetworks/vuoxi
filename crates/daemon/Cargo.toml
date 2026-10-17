@@ -13,6 +13,8 @@ vuoxi-store.workspace = true
 vuoxi-chunk.workspace = true
 vuoxi-layers.workspace = true
 vuoxi-transport-iroh.workspace = true
+vuoxi-rules.workspace = true
+vuoxi-watcher.workspace = true
 tower-service.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 

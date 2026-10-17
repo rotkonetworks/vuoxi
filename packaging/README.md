@@ -37,6 +37,22 @@
    ```
 
    The socket is `/run/vuoxi/<escaped-mount>.sock`; the daemon listens there and
-   the watcher connects, retrying every 5 s until the daemon is up.
+   the watcher connects, retrying every 5 s until the daemon is up. Point the
+   daemon at it in `~/.config/vuoxi/config.toml`:
+
+   ```toml
+   watcher_socket = "/run/vuoxi/home.sock"
+   ```
+
+   Without a watcher (no root on the machine), leave `watcher_socket` unset:
+   `vuoxi run` then reconciles every `VUOXI_POLL_SECS` seconds (default 60),
+   comparing metadata and hashing only what changed.
+
+6. Pair the devices. On each: `vuoxi init`, then exchange ids:
+
+   ```
+   vuoxi pair laptop <its id> [2001:db8::2]:41641
+   vuoxi folder add notes ~/notes --peer laptop
+   ```
 
 `systemd-analyze verify packaging/*.service` checks the units.

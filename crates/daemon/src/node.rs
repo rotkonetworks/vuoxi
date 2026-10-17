@@ -300,6 +300,7 @@ impl Inner {
             Event::Moved { from, to } => vec![from, to],
         };
         for rel in rels {
+            s.folder.lock().unwrap().touched(&rel);
             if s.folder.lock().unwrap().skip_file(&rel) {
                 continue;
             }
