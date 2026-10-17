@@ -141,6 +141,18 @@ path into the daemon.
   approve.
 - **Transports:** a unix socket locally, HTTP/WebSocket for the web UI,
   `vuoxi mcp-serve` (stdio MCP) for agents.
+- **CLI first, MCP as an adapter.** Agents with a shell use the CLI: it costs
+  no context until called, and output can be filtered (`| head`, `| jq`) before
+  it reaches the model. `mcp-serve` follows, a handful of tools over the same
+  verbs, for agents without a shell and for per-tool approval.
+- **One typed contract.** A `vuoxi-api` crate holds every request, response and
+  error as serde types. The wire JSON, the JSON Schema (also the MCP tool
+  schemas) and the web UI's TypeScript types are generated from it, never
+  written by hand. Every value carries `kind` and `schema` (version); errors
+  carry a stable `code`. Output defaults to a compact line format, short for
+  humans and for model context; `--json` (or `VUOXI_FORMAT=json`) selects JSON.
+  Both are renderings of the same typed value, so neither carries anything the
+  other lacks. RPC, MCP and the web always speak JSON.
 - **Agents are principals, not users borrowing a session.** Each agent holds its
   own capability, attenuated to the folders and verbs it needs, and every act
   is recorded in the journal under its name.
