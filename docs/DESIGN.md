@@ -190,6 +190,15 @@ depends on what they protect:
 - **Detection runs per subdirectory** and proposes overrides only where the
   signals clearly differ: "code; 2 subfolders look different: `vault` →
   secrets, `site/photos` → photos".
+- **Classification: rules first, a model for the leftovers.** Decisive signals
+  (CACHEDIR.TAG, manifests, `.kdbx`, `DCIM/`) are free and offline. Ambiguous
+  folders go to [jevx](https://github.com/rotkonetworks/jevx), a typed decision
+  model whose calibrated probabilities map onto apply / ask / unknown. Names are
+  sensitive, so jevx runs `--local` (a Unix-socket model, no hosted fallback) by
+  default; a hosted backend is an explicit per-folder opt-in and is never used
+  once a `secrets` signal has been seen. It runs on add and on new
+  subdirectories, never per event, and waits for mains on battery. vuoxi calls
+  the `jevx` CLI; without it, rules plus asking.
 - **Resolved once per directory.** The effective tag is cached under the
   directory handle the watcher already reports, so an event costs one lookup,
   not a walk to the root. `vuoxi why <path>` prints the whole chain.
