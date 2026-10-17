@@ -9,3 +9,9 @@ repository.workspace = true
 
 [dependencies]
 vuoxi-core.workspace = true
+tower-service.workspace = true
+iroh.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
