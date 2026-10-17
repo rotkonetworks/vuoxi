@@ -125,6 +125,66 @@ atomically (a sync burst lands whole or not at all); a root per folder
 (per-folder grants and priorities); verifiable state kept apart from
 machine-local bookkeeping; changes pushed to subscribers, never polled.
 
+## One surface: CLI, web, agents
+
+Every query and action is a typed verb on one JSON-RPC surface, as in drowse.
+The CLI, the web UI and agents are all thin clients of it; none has a private
+path into the daemon.
+
+- **Verbs are services.** The RPC router is a `Service`, so authentication,
+  rate limits and audit are layers on it, shared by every client.
+- **Read verbs:** folder status, roots, journal tail, conflicts, peer state,
+  power mode and wakeup cost.
+- **Act verbs follow plan → apply → revert.** `plan` returns the exact effect
+  (files, bytes, peers) without doing it; `apply` takes the plan's id; `revert`
+  undoes it via NOMT rollback. An agent can propose, a human or a policy can
+  approve.
+- **Transports:** a unix socket locally, HTTP/WebSocket for the web UI,
+  `vuoxi mcp-serve` (stdio MCP) for agents.
+- **Agents are principals, not users borrowing a session.** Each agent holds its
+  own capability, attenuated to the folders and verbs it needs, and every act
+  is recorded in the journal under its name.
+- **Token-efficient by construction.** An agent's context window is a budget
+  like a battery: every response is sized for it.
+  - Summaries first (counts, sizes, roots); detail on request by id.
+  - Deltas, not dumps: verbs take the journal cursor (`since`), so an agent
+    that already looked sees only what changed. The same cursor peers use.
+  - Every list is paginated and capped; nothing returns 1.8 M rows.
+  - Field selection, and a compact line format next to JSON.
+  - Few MCP tools with short descriptions, grouped by verb, so the tool list
+    itself stays cheap.
+- **Browser-capable core.** `core` and `layers` take no async runtime and no
+  unsafe, so they compile to WASM; a web client verifies roots and Merkle
+  proofs itself instead of trusting the gateway.
+
+## Sharing between parties
+
+Today's peers are one person's devices. Long term, folders are shared with
+other people and their agents, and publicly via links.
+
+- **Identity.** A device is a key. A person or an agent is a named set of
+  device keys.
+- **Capabilities, not ACLs.** A grant is a signed, attenuable token (biscuit
+  style): "read `photos/2026`, until Friday, no re-share". Holders can narrow a
+  grant before passing it on, never widen it; anyone can verify it offline.
+- **Encryption.** Each shared folder has its own content key, wrapped for each
+  recipient. A share link carries a read capability and key in the URL
+  fragment, which never reaches a server. Revocation rotates the folder key.
+- **Reachability.** Off the mesh, peers reach each other through relays (iroh's)
+  or a web gateway that sees only ciphertext.
+
+**Where Ligerito fits.** Integrity of an ordinary shared file is a NOMT Merkle
+proof plus a signed root; that needs nothing heavier. Ligerito (transparent,
+hash-based polynomial commitments with a WASM verifier build) earns its place
+where a party must check something about *a lot* of data without fetching it:
+
+- **Archive audits:** a host proves it still holds its ZODA shards, answering
+  random challenges with a small proof instead of shipping the data back.
+- **Light verifiers:** a browser or an agent checks a claim about a large
+  shared dataset from a ~150 KB proof.
+
+It is a later-stage tool behind the `Archive` seam, not part of the sync path.
+
 ## Security
 
 **Privilege separation.** The watcher is the only privileged process: ~200
@@ -148,7 +208,8 @@ compromised cannot return corrupted data unnoticed.
 ## Non-goals
 
 - Phone sync. Phones keep using syncthing; vuoxi may speak BEP later.
-- Internet discovery and NAT traversal. The mesh already solves addressing.
+- Internet discovery and NAT traversal for one's own devices; the mesh already
+  solves addressing. (Sharing with other parties will need relays; see above.)
 - Git's job. Source trees travel by git; vuoxi syncs what git does not.
 - Non-Linux hosts, for now.
 
@@ -177,4 +238,6 @@ compromised cannot return corrupted data unnoticed.
 3. Two-peer sync over one transport: journal cursors, root-compare repair,
    conflicts in the simulator.
 4. Power layers wired to drowse budgets.
-5. Second transport, then the ZODA archive tier.
+5. RPC surface with plan/apply/revert; CLI, `mcp-serve`, then the web UI.
+6. Capabilities and per-folder keys; sharing with another person's devices.
+7. Second transport, ZODA archive tier, Ligerito storage audits.
