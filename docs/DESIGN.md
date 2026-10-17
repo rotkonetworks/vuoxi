@@ -71,7 +71,7 @@ same engine over in-memory fakes and the simulator.
 | `store` | change journal (commonware `storage::journal`) + manifest index (NOMT) |
 | `transport-iroh` | QUIC via iroh: the one transport |
 | `archive` | ZODA erasure coding: relay batches (temporary) and the backup tier (durable) |
-| `sim` | deterministic scenarios on the commonware runtime |
+| `sim` | deterministic reference model: seeded scheduler, partitions, crashes, concurrent edits |
 
 ## Power modes
 
