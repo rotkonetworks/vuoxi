@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/chunk",
     "crates/layers",
     "crates/watcher",
     "crates/store",
@@ -24,6 +25,9 @@ tower-layer = "0.3"
 pin-project-lite = "0.2"
 vuoxi-core = { path = "crates/core" }
 vuoxi-layers = { path = "crates/layers" }
+vuoxi-chunk = { path = "crates/chunk" }
+fastcdc = "5"
+blake3 = "1"
 
 [profile.release]
 lto = true
