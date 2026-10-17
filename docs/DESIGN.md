@@ -195,7 +195,9 @@ where a party must check something about *a lot* of data without fetching it:
 - **Light verifiers:** a browser or an agent checks a claim about a large
   shared dataset from a ~150 KB proof.
 
-It is a later-stage tool behind the `Archive` seam, not part of the sync path.
+It is opt-in, behind the `Archive` seam, never on the sync path. The default
+audit is simpler: at upload the writer keeps a few random nonces and
+`blake3(nonce ‖ shard)`, and later asks a relay for one.
 
 ## Relays: a personal DA layer
 
@@ -210,6 +212,16 @@ laptop can push once and sleep, and the phone pulls when it wakes.
 - **Untrusted by construction.** Relays hold ciphertext shards. Each shard is
   checked against the batch commitment on arrival, so a relay can drop data but
   cannot corrupt it unnoticed. Relays never hold a folder key.
+- **Why ZODA and not plain Reed-Solomon.** With Reed-Solomon plus a Merkle
+  commitment each shard is authentic, but a bad *encoding* only shows after n
+  shards are downloaded and decoded, and different subsets can decode to
+  different data. ZODA proves from one checked shard that the encoding is valid:
+  every recipient will rebuild the same batch, known before the download. This
+  matters whenever the encoder is not you (another member of a shared folder,
+  their agent, a buggy peer) and stops a writer from equivocating between
+  recipients. One code path: every relay batch is ZODA-encoded. Encoding costs
+  CPU per batch, so in Batched mode small changes go directly to awake peers and
+  only batches over a measured threshold are encoded.
 - **The writer sleeps early.** ZODA's property is that one checked shard proves
   the batch was encoded validly. Once enough relays confirm their slices (and a
   few random samples come back), the writer knows the batch is retrievable and
@@ -220,8 +232,9 @@ laptop can push once and sleep, and the phone pulls when it wakes.
   journal cursor has passed it, or until its TTL expires, whichever is first.
   Retention is part of the relay's capability: "opaque blobs, up to 50 GB, up to
   7 days".
-- **Audits.** Relays that claim to hold shards can be challenged; Ligerito
-  proofs keep the answer small.
+- **Audits.** Relays that claim to hold shards can be challenged with
+  precomputed nonce/hash pairs; Ligerito proofs are an opt-in for audits by
+  third parties.
 - **Metadata.** Relays see sizes and timing, not names or contents. Padding
   batches to size classes is an option for folders that need it.
 
@@ -306,4 +319,4 @@ compromised cannot return corrupted data unnoticed.
    introducer; sharing with another person's devices.
 7. Relays: ZODA-encoded batches, retention by cursor/TTL, writer sleeps after
    availability is confirmed.
-8. Second transport, ZODA archive tier, Ligerito audits of relays and archives.
+8. ZODA archive tier; opt-in Ligerito audits.
