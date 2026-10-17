@@ -406,6 +406,11 @@ compromised cannot return corrupted data unnoticed.
   prototyped and kept on a branch; one transport keeps `core` to one message
   model. iroh's QUIC keep-alives cannot be disabled on an open connection, so
   idle connections are closed after a short timeout and redialled on demand.
+- **btrfs subvolumes:** the kernel refuses a filesystem-wide fanotify mark on
+  a btrfs subvolume (`EXDEV`), the usual layout for `/` and `/home` on btrfs.
+  Such devices fall back to a metadata poll (no hashing unless metadata
+  changed). Options: per-directory inode marks (inotify-like cost), or one mark
+  per subvolume root if a kernel accepts it.
 - **Reboot gap on ext4:** nothing records changes while the watcher is down.
   The reconcile pass bounds the cost; filesystems with generation numbers
   (btrfs) could skip it.

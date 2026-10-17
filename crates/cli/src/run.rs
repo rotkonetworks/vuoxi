@@ -1,6 +1,8 @@
 //! `vuoxi run`: the sync engine for the folders in the config.
 
 use crate::args::Opts;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use vuoxi_config::{Config, DeviceKey};
 use vuoxi_daemon::watch::{self, Watched};
@@ -93,33 +95,42 @@ fn go(o: &Opts) -> Result<(), String> {
                 .join(", ")
         );
 
+        // The watcher drives changes when it is connected; otherwise a metadata
+        // poll does, so a missing or crashed watcher degrades to slower sync,
+        // never to none.
+        let connected = Arc::new(AtomicBool::new(false));
         let _watch = match &cfg.watcher_socket {
             Some(sock) => {
-                eprintln!("vuoxi: waiting for the watcher on {}", sock.display());
+                eprintln!(
+                    "vuoxi: waiting for the watcher on {}; polling meanwhile",
+                    sock.display()
+                );
                 Some(
-                    watch::spawn(sock, watched, node.events())
+                    watch::spawn(sock, watched, node.events(), connected.clone())
                         .map_err(|e| format!("watcher socket: {e}"))?,
                 )
             }
             None => {
-                let secs = std::env::var("VUOXI_POLL_SECS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(DEFAULT_POLL_SECS);
-                eprintln!("vuoxi: no watcher socket configured; reconciling every {secs}s");
-                let tx = node.events();
-                let ids: Vec<String> = cfg.folders.iter().map(|f| f.id.clone()).collect();
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(Duration::from_secs(secs)).await;
-                        for id in &ids {
-                            let _ = tx.send((id.clone(), Event::Overflow));
-                        }
-                    }
-                });
+                eprintln!("vuoxi: no watcher socket configured; polling");
                 None
             }
         };
+        let secs = std::env::var("VUOXI_POLL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_POLL_SECS);
+        let tx = node.events();
+        let ids: Vec<String> = cfg.folders.iter().map(|f| f.id.clone()).collect();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+                if !connected.load(Ordering::Relaxed) {
+                    for id in &ids {
+                        let _ = tx.send((id.clone(), Event::Overflow));
+                    }
+                }
+            }
+        });
 
         tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;
         eprintln!("vuoxi: stopping");

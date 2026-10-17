@@ -7,13 +7,17 @@
 //!
 //! A (re)connection means events may have been missed, so every folder gets
 //! one [`Event::Overflow`]: a metadata-only reconcile that hashes nothing that
-//! did not change.
+//! did not change. While no watcher is connected, `connected` is false and the
+//! caller polls instead (a filesystem the watcher cannot mark, such as a btrfs
+//! subvolume, never connects).
 
 use crate::node::Event;
 use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::UnboundedSender;
 use vuoxi_core::RelPath;
 use vuoxi_rules::{Decision, Rules, Tag};
@@ -57,6 +61,7 @@ pub fn spawn(
     socket: &Path,
     folders: Vec<Watched>,
     events: UnboundedSender<(String, Event)>,
+    connected: Arc<AtomicBool>,
 ) -> io::Result<std::thread::JoinHandle<()>> {
     if let Some(dir) = socket.parent() {
         std::fs::create_dir_all(dir)?;
@@ -83,13 +88,17 @@ pub fn spawn(
             if conn.read_exact(&mut hello).is_err() || hello != HELLO {
                 continue;
             }
+            connected.store(true, Ordering::Relaxed);
+            eprintln!("vuoxi: watcher connected");
             for s in &mut slots {
                 let _ = s.map.rebuild(skipper(&mut s.rules));
                 let _ = events.send((s.id.clone(), Event::Overflow));
             }
             if pump(&mut conn, &mut slots, &events).is_err() {
-                eprintln!("vuoxi: watcher stream ended badly; waiting for it to reconnect");
+                eprintln!("vuoxi: watcher stream ended badly");
             }
+            connected.store(false, Ordering::Relaxed);
+            eprintln!("vuoxi: watcher gone; polling until it reconnects");
         }
     }))
 }
