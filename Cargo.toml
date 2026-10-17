@@ -9,6 +9,7 @@ members = [
     "crates/transport-iroh",
     "crates/transport-commonware",
     "crates/sim",
+    "crates/caps",
 ]
 
 [workspace.package]
@@ -24,6 +25,8 @@ tower-layer = "0.3"
 pin-project-lite = "0.2"
 vuoxi-core = { path = "crates/core" }
 vuoxi-layers = { path = "crates/layers" }
+biscuit-auth = "6"
+ed25519-dalek = "2"
 
 [profile.release]
 lto = true
