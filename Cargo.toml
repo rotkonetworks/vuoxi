@@ -24,6 +24,8 @@ tower-layer = "0.3"
 pin-project-lite = "0.2"
 vuoxi-core = { path = "crates/core" }
 vuoxi-layers = { path = "crates/layers" }
+nomt = "1.0.5"
+blake3 = "1"
 
 [profile.release]
 lto = true
