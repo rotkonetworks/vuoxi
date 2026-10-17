@@ -96,6 +96,48 @@ drowse already tests its own footprint.
 - `VersionVector::compare` yields Equal, Behind, Ahead or Concurrent. Concurrent
   edits keep both versions; vuoxi never silently overwrites.
 
+## What to sync: reproducibility, not lists
+
+A developer's tree is mostly build output. In one 486-project tree, 265 GB sat
+in build directories, and 55 of its 57 Rust `target/` directories carried a
+`CACHEDIR.TAG`. vuoxi syncs what cannot be rebuilt and skips what can, with no
+configuration in the common case. Rules, first match wins:
+
+1. **`keep` patterns** in a `.vuoxi` file force a path to sync.
+2. **`CACHEDIR.TAG`** (the cache-directory standard cargo and others write)
+   skips its directory.
+3. **Rebuildable next to its manifest:** `target/` beside `Cargo.toml`,
+   `node_modules/` beside `package.json`, a venv containing `pyvenv.cfg`,
+   `__pycache__`, `.zig-cache`, `.next`, `dist/` beside a JS manifest. A small
+   built-in table, extended as tools are met.
+4. **`ignore` patterns** in a `.vuoxi` file.
+5. **`.git/`** is skipped; tracked source is synced.
+6. Everything else syncs.
+
+`.gitignore` is deliberately **not** an exclusion list. With build output
+caught by rules 2–3, what remains in it is mostly what cannot be rebuilt:
+`.env`, local databases, keys, notes.
+
+A `.vuoxi` file (TOML, gitignore-style patterns) may sit in any directory; the
+nearest applies:
+
+```toml
+ignore   = ["*.log", "coverage/"]
+keep     = [".env", "data/*.db"]
+priority = "urgent"   # urgent | normal | bulk (bulk waits for mains)
+```
+
+**Visible, not magic.** `vuoxi why <path>` names the rule that decided;
+`vuoxi skipped --top 10` lists the largest skipped directories and the bytes
+saved. A large gitignored directory that no rule recognises is flagged once,
+rather than synced as gigabytes or dropped silently.
+
+**Decided once, filtered at the source.** When the daemon decides a directory
+is skipped it hands the directory's handle to the watcher, which then drops its
+events before they cross the socket. A `cargo build` writing thousands of files
+into `target/` costs nothing beyond the kernel. A new `target/` is recognised
+the moment cargo writes its `CACHEDIR.TAG`.
+
 ## Storage and reconciliation
 
 ```
