@@ -1,0 +1,17 @@
+[package]
+name = "vuoxi"
+description = "The vuoxi CLI: a thin client of the daemon's JSON-RPC surface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "vuoxi"
+path = "src/main.rs"
+
+[dependencies]
+vuoxi-rpc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
