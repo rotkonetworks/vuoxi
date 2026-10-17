@@ -31,7 +31,7 @@ vuoxi why ~/notes/target/x.o                 # which rule decided
 cargo test --workspace
 ```
 
-Needs Rust 1.88+.
+Needs Rust 1.91+.
 
 ## License
 
