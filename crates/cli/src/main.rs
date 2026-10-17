@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod args;
+mod local;
 mod render;
 
 use args::{Cmd, Opts, USAGE};
@@ -46,6 +47,12 @@ fn run() -> i32 {
             return 1;
         }
         Cmd::Daemon => return daemon(&socket, o.read_only),
+        Cmd::Init
+        | Cmd::Id
+        | Cmd::Pair { .. }
+        | Cmd::FolderAdd { .. }
+        | Cmd::FolderList
+        | Cmd::ConfigPath => return local::run(cmd, &o, want_json(&o)),
         Cmd::Status => ("status", None),
         Cmd::Changes => ("changes", page(&o)),
         Cmd::Conflicts => ("conflicts", page(&o)),

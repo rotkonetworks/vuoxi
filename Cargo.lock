@@ -4123,6 +4123,7 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
+ "vuoxi-config",
  "vuoxi-rpc",
 ]
 
@@ -4157,6 +4158,16 @@ version = "0.0.1"
 dependencies = [
  "blake3",
  "fastcdc",
+ "vuoxi-core",
+]
+
+[[package]]
+name = "vuoxi-config"
+version = "0.0.1"
+dependencies = [
+ "ed25519-dalek 2.2.0",
+ "serde",
+ "toml",
  "vuoxi-core",
 ]
 

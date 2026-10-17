@@ -15,6 +15,7 @@ members = [
     "crates/caps",
     "crates/daemon",
     "crates/rules",
+    "crates/config",
 ]
 
 [workspace.package]
@@ -48,6 +49,7 @@ ed25519-dalek = "2"
 toml = "0.9"
 ignore = "0.4"
 vuoxi-rules = { path = "crates/rules" }
+vuoxi-config = { path = "crates/config" }
 
 [profile.release]
 lto = true

@@ -1,0 +1,14 @@
+[package]
+name = "vuoxi-config"
+description = "Device key and on-disk configuration of a vuoxi node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vuoxi-core.workspace = true
+serde.workspace = true
+toml.workspace = true
+ed25519-dalek.workspace = true

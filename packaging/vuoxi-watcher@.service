@@ -1,0 +1,54 @@
+# One watcher per filesystem. The instance is the escaped mount point:
+#   systemctl enable --now "vuoxi-watcher@$(systemd-escape --path /home).service"
+# The root filesystem is the instance "-". The socket is /run/vuoxi/<instance>.sock;
+# the user daemon listens there (`watcher_socket` in its config), the watcher connects.
+[Unit]
+Description=vuoxi fanotify watcher for /%I
+Documentation=https://github.com/rotkonetworks/vuoxi
+# The daemon owns the socket; if it is not up yet the watcher exits and is retried.
+After=local-fs.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/vuoxi-watcher /%I /run/vuoxi/%i.sock
+Restart=on-failure
+RestartSec=5
+
+# What the watcher needs: CAP_SYS_ADMIN for the fanotify filesystem mark.
+# At startup it also connects to a socket owned by an ordinary user with mode
+# 0600 (CAP_DAC_OVERRIDE) and then prunes its own bounding set (CAP_SETPCAP),
+# after which only CAP_SYS_ADMIN is left, and finally installs a seccomp filter.
+# If the socket is made root-accessible, CAP_DAC_OVERRIDE can be removed here;
+# if CAP_SETPCAP is removed the watcher still runs but cannot prune.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_SETPCAP
+NoNewPrivileges=yes
+
+# Everything else: no files written, no network, no other users' views.
+ProtectSystem=strict
+ReadWritePaths=/run/vuoxi
+# ProtectHome is deliberately NOT set: the mount to watch may live under /home.
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+# No SystemCallFilter here: the watcher installs a tighter seccomp allowlist
+# itself, and the setup syscalls before it (fanotify_*, seccomp, prctl, capset)
+# are not all in systemd's groups.
+
+[Install]
+WantedBy=multi-user.target

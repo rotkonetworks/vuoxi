@@ -1,0 +1,29 @@
+# User unit: `systemctl --user enable --now vuoxi.service`
+[Unit]
+Description=vuoxi sync daemon
+Documentation=https://github.com/rotkonetworks/vuoxi
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/vuoxi daemon
+Restart=on-failure
+RestartSec=5
+# Stay out of the way of interactive work.
+Nice=10
+IOSchedulingClass=idle
+# CPU affinity is left to you, e.g. pin to efficiency cores:
+#   CPUAffinity=0-3
+# or `systemctl --user edit vuoxi.service` to add it as a drop-in.
+
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# Not set, because the daemon must write the folders you sync, its state dir and
+# /run/vuoxi: ProtectSystem=strict / ProtectHome=read-only with matching
+# ReadWritePaths= once your layout is settled.
+
+[Install]
+WantedBy=default.target
