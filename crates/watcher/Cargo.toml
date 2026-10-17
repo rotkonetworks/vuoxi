@@ -9,3 +9,7 @@ repository.workspace = true
 
 [dependencies]
 vuoxi-core.workspace = true
+libc = "0.2"
+nix = { version = "0.31", default-features = false, features = ["process"] }
+caps = "0.5"
+seccompiler = "0.5"
