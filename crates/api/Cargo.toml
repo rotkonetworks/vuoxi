@@ -1,0 +1,15 @@
+[package]
+name = "vuoxi-api"
+description = "The typed contract of vuoxi: every request, response and error that crosses the RPC, CLI, MCP and web boundary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+schemars.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
