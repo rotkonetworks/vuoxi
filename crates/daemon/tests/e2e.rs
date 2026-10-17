@@ -171,7 +171,14 @@ async fn two_devices_converge() {
     assert_eq!(mb.mode() & 0o7777, 0o600);
     assert_eq!((mb.mtime(), mb.mtime_nsec()), (ma.mtime(), ma.mtime_nsec()));
 
-    // Our own write, seen by B's detector, is not a new version.
+    // Our own write, seen by B's detector, is not a new version. Wait until B
+    // has recorded the file it wrote (the rename lands before the record).
+    eventually("B recorded a.txt", || {
+        nb.with_folder(FOLDER, |f| f.known_meta(&rel("a.txt")))
+            .flatten()
+            .is_some_and(|m| m.mode == 0o600)
+    })
+    .await;
     let head = nb.with_folder(FOLDER, |f| f.head()).unwrap();
     nb.apply_event(FOLDER, Event::Changed(rel("a.txt")))
         .await

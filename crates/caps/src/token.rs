@@ -12,7 +12,9 @@
 //! the result is refused everywhere.
 
 use crate::{Biscuit, Denied, Error, PeerId, RelayLimit, Right, Scope, Signer, hex, public_key};
+use biscuit_auth::AuthorizerLimits;
 use biscuit_auth::builder::{AuthorizerBuilder, BiscuitBuilder, BlockBuilder};
+use std::time::Duration;
 
 /// What the seeder puts in a root token.
 #[derive(Clone, Debug)]
@@ -173,7 +175,14 @@ allow if folder($f), req_folder($f), verb("relay"),
     {
         return Err(Denied("bad folder id".into()));
     }
+    // biscuit's default 1 ms budget denies valid tokens on a busy or cold CPU;
+    // the fact and iteration caps still bound the work.
+    let limits = AuthorizerLimits {
+        max_time: Duration::from_millis(50),
+        ..AuthorizerLimits::default()
+    };
     let mut a = AuthorizerBuilder::new()
+        .set_limits(limits)
         .code(code)
         .and_then(|b| b.build(token))
         .map_err(|e| Denied(e.to_string()))?;
