@@ -72,7 +72,7 @@ build both and measure instead of deciding in advance.
 | `store` | change journal (commonware `storage::journal`) + manifest index (NOMT) |
 | `transport-iroh` | QUIC via iroh, `iroh-blobs` for verified BLAKE3 transfer |
 | `transport-commonware` | `p2p::authenticated` among a fixed set of keyed peers |
-| `archive` | ZODA erasure-coded backup tier |
+| `archive` | ZODA erasure coding: relay batches (temporary) and the backup tier (durable) |
 | `sim` | deterministic scenarios on the commonware runtime |
 
 ## Power modes
@@ -197,6 +197,57 @@ where a party must check something about *a lot* of data without fetching it:
 
 It is a later-stage tool behind the `Archive` seam, not part of the sync path.
 
+## Relays: a personal DA layer
+
+Sync between two devices normally needs both awake at once. Relays remove that:
+servers with bandwidth but little storage hold recent data for a while, so a
+laptop can push once and sleep, and the phone pulls when it wakes.
+
+- **Upload once, erasure-coded.** The writer encrypts, then ZODA-encodes a batch
+  into n + k shards and gives each relay a different slice. Any n shards
+  rebuild the batch; the writer's upload is (n + k) / n of the data, not one
+  copy per relay.
+- **Untrusted by construction.** Relays hold ciphertext shards. Each shard is
+  checked against the batch commitment on arrival, so a relay can drop data but
+  cannot corrupt it unnoticed. Relays never hold a folder key.
+- **The writer sleeps early.** ZODA's property is that one checked shard proves
+  the batch was encoded validly. Once enough relays confirm their slices (and a
+  few random samples come back), the writer knows the batch is retrievable and
+  can sleep: personal data availability.
+- **Download from everywhere.** A waking device fetches shards from whichever
+  relays and peers answer fastest, in parallel, and stops at n.
+- **Temporal by default.** A relay keeps a batch until every intended peer's
+  journal cursor has passed it, or until its TTL expires, whichever is first.
+  Retention is part of the relay's capability: "opaque blobs, up to 50 GB, up to
+  7 days".
+- **Audits.** Relays that claim to hold shards can be challenged; Ligerito
+  proofs keep the answer small.
+- **Metadata.** Relays see sizes and timing, not names or contents. Padding
+  batches to size classes is an option for folders that need it.
+
+In the type system a relay is a peer with a role, behind the same `Transport`
+seam; whether a device or a relay serves a shard is invisible to the engine.
+
+## Introducers
+
+Someone has to tell a new member which peers, relays and roots belong to a
+folder.
+
+- **Default: the original seeder.** The device that created a folder signs the
+  root of its capability chain and is its introducer.
+- **Introducing is a capability.** The seeder can delegate `introduce` like any
+  other right, attenuated ("may introduce devices of person X, not other
+  people"). Until it does, every introduction traces back to the seeder.
+- **Membership is a journal.** Grants, revocations, relay lists and
+  introductions are signed entries in a per-folder membership log, synced like
+  data. Any member verifies every entry against the chain; an entry from
+  someone without the right is ignored, not trusted.
+- **More than one introducer** once a folder has several people: any holder of
+  `introduce` may add members within their own scope. Policies such as
+  "adding a person needs two introducers" are a later layer.
+- **Losing the seeder** must not orphan a folder: delegate `introduce` to a
+  second device early (the CLI suggests it when a folder gets its second device).
+
 ## Security
 
 **Privilege separation.** The watcher is the only privileged process: ~200
@@ -251,5 +302,8 @@ compromised cannot return corrupted data unnoticed.
    conflicts in the simulator.
 4. Power layers wired to drowse budgets.
 5. RPC surface with plan/apply/revert; CLI, `mcp-serve`, then the web UI.
-6. Capabilities and per-folder keys; sharing with another person's devices.
-7. Second transport, ZODA archive tier, Ligerito storage audits.
+6. Capabilities, per-folder keys, membership journal with the seeder as
+   introducer; sharing with another person's devices.
+7. Relays: ZODA-encoded batches, retention by cursor/TTL, writer sleeps after
+   availability is confirmed.
+8. Second transport, ZODA archive tier, Ligerito audits of relays and archives.
