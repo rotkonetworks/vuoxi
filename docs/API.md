@@ -102,5 +102,9 @@ Pull from every peer now. `200 {"ok": true}`.
 ## Static files
 
 Everything outside `/api/` is the dashboard, served from the directory in
-`VUOXI_UI_DIR` (default `/usr/local/share/vuoxi/ui`), `index.html` for unknown
-paths.
+`VUOXI_UI_DIR` (default `$XDG_DATA_HOME/vuoxi/ui`, i.e. `~/.local/share/vuoxi/ui`),
+`index.html` for unknown paths. Build it with `cd ui && pnpm build` and copy
+`ui/dist/` there.
+
+`GET /api/folders/{id}/changes` also takes `desc=1`: the newest `limit`
+entries, newest first. Transfers currently report downloads only.

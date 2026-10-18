@@ -370,6 +370,17 @@ folder.
 - **Losing the seeder** must not orphan a folder: delegate `introduce` to a
   second device early (the CLI suggests it when a folder gets its second device).
 
+## Safety nets (implemented)
+
+- **Trash:** a file a peer replaces or deletes is moved to
+  `.vuoxi-trash/<unix seconds>/<path>` in the folder (same filesystem, a
+  rename), never synced, pruned after `trash_days` (default 30). The dashboard
+  lists and restores it.
+- **Read-only peers:** `--ro-peer NAME` on a folder: that peer receives the
+  folder but its changes are never accepted here (offers ignored, never pulled).
+- **Mesh-only listening:** set `listen` to the mesh address.
+- **Encrypted relays:** see PROTOCOL.md; a relay stores sealed data only.
+
 ## Security
 
 **Privilege separation.** The watcher is the only privileged process: ~200

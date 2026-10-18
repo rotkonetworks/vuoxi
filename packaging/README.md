@@ -56,3 +56,35 @@
    ```
 
 `systemd-analyze verify packaging/*.service` checks the units.
+
+## A relay
+
+A relay is an always-on machine that stores your folders **encrypted** and
+serves them to your devices, so two devices never need to be online at the same
+time. It holds no folder keys and cannot read names or contents.
+
+On the relay (a small container is enough):
+
+```
+vuoxi init                                   # prints the relay's id
+vuoxi pair laptop <laptop id> [2001:db8::2]:41641
+vuoxi pair desktop <desktop id> [2001:db8::1]:41641
+# config.toml: relay_dir = "/var/lib/vuoxi/relay"   (no [[folder]] entries)
+vuoxi run
+```
+
+On every device:
+
+```
+vuoxi pair relay <relay id> [2001:db8::10]:41641 --relay
+# add "relay" to the folder's peers; every device must use the same folder key:
+vuoxi folder key notes          # on the device that created the folder
+# then `key = "<that hex>"` in the folder's [[folder]] block on the others
+```
+
+Firewall the relay so only your devices reach UDP 41641.
+
+## Dashboard
+
+`vuoxi run` serves it on `127.0.0.1:41642`. Build `ui/` (`pnpm build`), copy
+`ui/dist/` to `~/.local/share/vuoxi/ui/`, then open the link `vuoxi ui` prints.
