@@ -101,6 +101,9 @@ struct Inner {
     wake: Notify,
     relays: HashSet<PeerId>,
     seals: HashMap<String, Seal>,
+    /// When each peer last answered or asked us something.
+    last_seen: Mutex<HashMap<PeerId, std::time::Instant>>,
+    transfers: Mutex<Transfers>,
     /// Local changes to push to relays.
     relay_wake: Notify,
 }
@@ -166,6 +169,8 @@ impl Node {
             peers,
             writers,
             relays: cfg.peers.iter().filter(|p| p.relay).map(|p| p.id).collect(),
+            last_seen: Mutex::new(HashMap::new()),
+            transfers: Mutex::new(Transfers::default()),
             seals,
             relay_wake: Notify::new(),
             transport,
@@ -275,12 +280,36 @@ impl Node {
         Some(f(&s.folder.lock().unwrap()))
     }
 
+    pub fn folder_ids(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.inner.folders.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Seconds since each known peer was last heard from (`None`: never).
+    pub fn last_seen(&self) -> HashMap<PeerId, Option<Duration>> {
+        let seen = self.inner.last_seen.lock().unwrap();
+        self.inner
+            .peers
+            .keys()
+            .map(|p| (*p, seen.get(p).map(|t| t.elapsed())))
+            .collect()
+    }
+
+    pub fn is_relay(&self, p: &PeerId) -> bool {
+        self.inner.relays.contains(p)
+    }
+
+    pub fn transfers(&self) -> Vec<Transfer> {
+        self.inner.transfers.lock().unwrap().snapshot()
+    }
+
     /// Process one event and wait for it; detectors use [`Node::events`].
     pub async fn apply_event(&self, folder: &str, ev: Event) -> io::Result<()> {
         self.inner.local_event(folder, ev).await
     }
 
-    pub async fn shutdown(self) {
+    pub async fn shutdown(&self) {
         for t in &self.tasks {
             t.abort();
         }
@@ -481,40 +510,68 @@ impl Inner {
     ) -> io::Result<Vec<ChunkEntry>> {
         let mut staged = Staged::new(root, &m.rel)?;
         let mut offsets = Vec::with_capacity(m.chunks.len());
-        let mut at = 0u64;
         let folder = s.folder.lock().unwrap().id.clone();
+        let t = self
+            .transfers
+            .lock()
+            .unwrap()
+            .start(&folder, &m.rel, peer, m.meta.size);
+        let res = self
+            .assemble(peer, s, &folder, m, &mut staged, &mut offsets, t)
+            .await;
+        let res = res.and_then(|()| {
+            if offsets.iter().map(|o| o.2 as u64).sum::<u64>() != m.meta.size {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "assembled size differs from manifest",
+                ));
+            }
+            vfs::to_trash(root, &m.rel)
+        });
+        if let Err(e) = res {
+            staged.abort();
+            self.transfers
+                .lock()
+                .unwrap()
+                .finish(t, Some(e.to_string()));
+            return Err(e);
+        }
+        staged.commit(m.meta)?;
+        self.transfers.lock().unwrap().finish(t, None);
+        Ok(offsets)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn assemble(
+        &self,
+        peer: PeerId,
+        s: &Shared,
+        folder: &str,
+        m: &Manifest,
+        staged: &mut Staged,
+        offsets: &mut Vec<ChunkEntry>,
+        t: u64,
+    ) -> io::Result<()> {
+        let mut at = 0u64;
         for &id in &m.chunks {
             let local = s.folder.lock().unwrap().read_chunk(id);
             let bytes = match local {
                 Some(b) => b,
-                None => match self.fetch_chunk(peer, &folder, id).await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        staged.abort();
-                        return Err(e);
-                    }
-                },
+                None => self.fetch_chunk(peer, folder, id).await?,
             };
-            if let Err(e) = staged.write(&bytes) {
-                staged.abort();
-                return Err(e);
-            }
+            staged.write(&bytes)?;
             offsets.push((id, at, bytes.len()));
             at += bytes.len() as u64;
+            self.transfers.lock().unwrap().progress(t, at);
         }
-        if at != m.meta.size {
-            staged.abort();
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "assembled size differs from manifest",
-            ));
-        }
-        if let Err(e) = vfs::to_trash(root, &m.rel) {
-            staged.abort();
-            return Err(e);
-        }
-        staged.commit(m.meta)?;
-        Ok(offsets)
+        Ok(())
+    }
+
+    fn seen(&self, peer: PeerId) {
+        self.last_seen
+            .lock()
+            .unwrap()
+            .insert(peer, std::time::Instant::now());
     }
 
     /// One chunk from a peer, verified; from a relay, unsealed and verified.
@@ -550,6 +607,9 @@ impl Inner {
             if self.mode.get() != Mode::Hold {
                 let ok = self.relay_push(relay, &folder).await.is_ok()
                     & self.relay_pull(relay, &folder).await.is_ok();
+                if ok {
+                    self.seen(relay);
+                }
                 failures = if ok { 0 } else { failures + 1 };
             }
             let wait = retry_wait(self.interval(every), failures);
@@ -717,7 +777,10 @@ impl Inner {
             if self.mode.get() != Mode::Hold {
                 // An offline peer is normal; retry sooner at first, then settle.
                 failures = match self.pull_once(peer, &folder).await {
-                    Ok(()) => 0,
+                    Ok(()) => {
+                        self.seen(peer);
+                        0
+                    }
                     Err(_) => failures + 1,
                 };
             }
@@ -777,6 +840,7 @@ impl Inner {
     }
 
     async fn handle(self: Arc<Self>, peer: PeerId, w: Wire) -> Option<Wire> {
+        self.seen(peer);
         let writes = |f: &str| {
             self.writers
                 .get(&peer)
@@ -818,6 +882,74 @@ impl Inner {
             }
             _ => None,
         }
+    }
+}
+
+/// One file being written from a peer, for the dashboard.
+#[derive(Clone, Debug)]
+pub struct Transfer {
+    pub id: u64,
+    pub folder: String,
+    pub rel: String,
+    pub peer: PeerId,
+    pub size: u64,
+    pub done: u64,
+    pub started: std::time::Instant,
+    pub finished: Option<std::time::Instant>,
+    pub error: Option<String>,
+}
+
+/// Active transfers plus the most recent finished ones.
+#[derive(Default)]
+struct Transfers {
+    next: u64,
+    items: std::collections::VecDeque<Transfer>,
+}
+
+const KEEP_FINISHED: usize = 200;
+
+impl Transfers {
+    fn start(&mut self, folder: &str, rel: &RelPath, peer: PeerId, size: u64) -> u64 {
+        self.next += 1;
+        self.items.push_front(Transfer {
+            id: self.next,
+            folder: folder.to_owned(),
+            rel: rel.as_str().to_owned(),
+            peer,
+            size,
+            done: 0,
+            started: std::time::Instant::now(),
+            finished: None,
+            error: None,
+        });
+        while self.items.len() > KEEP_FINISHED
+            && self.items.back().is_some_and(|t| t.finished.is_some())
+        {
+            self.items.pop_back();
+        }
+        self.next
+    }
+
+    fn progress(&mut self, id: u64, done: u64) {
+        if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
+            t.done = done;
+        }
+    }
+
+    fn finish(&mut self, id: u64, error: Option<String>) {
+        if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
+            t.finished = Some(std::time::Instant::now());
+            if error.is_none() {
+                t.done = t.size;
+            }
+            t.error = error;
+        }
+    }
+
+    fn snapshot(&self) -> Vec<Transfer> {
+        let mut v: Vec<Transfer> = self.items.iter().cloned().collect();
+        v.sort_by_key(|t| (t.finished.is_some(), std::cmp::Reverse(t.id)));
+        v
     }
 }
 

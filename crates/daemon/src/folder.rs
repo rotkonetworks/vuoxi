@@ -118,6 +118,11 @@ impl Folder {
         self.catalog.get(&PathId::of(&self.id, rel))
     }
 
+    /// Every manifest, tombstones included.
+    pub fn entries(&self) -> impl Iterator<Item = &Manifest> {
+        self.catalog.values()
+    }
+
     pub fn live(&self) -> impl Iterator<Item = &Manifest> {
         self.catalog.values().filter(|m| !m.meta.deleted)
     }

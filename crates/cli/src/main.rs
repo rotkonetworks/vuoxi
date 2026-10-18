@@ -50,6 +50,7 @@ fn run() -> i32 {
         }
         Cmd::Daemon => return daemon(&socket, o.read_only),
         Cmd::Run => return run::run(&o),
+        Cmd::Ui => return run::ui_link(&o),
         Cmd::Why(p) => return why::run(&p, &o, want_json(&o)),
         Cmd::Init
         | Cmd::Id

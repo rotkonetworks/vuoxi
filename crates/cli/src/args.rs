@@ -12,6 +12,7 @@ usage: vuoxi [--json] [--socket PATH] [--config PATH] [--fields a,b] <command>
   revert PLAN                       undo an applied plan
   run                               run the sync engine for the configured folders
   why PATH                          which rule decides whether PATH syncs
+  ui                                print the dashboard login link
   daemon [--read-only]              serve the socket (fake state for now)
   mcp-serve                         MCP over stdio (not implemented yet)
   init                              create device key and config; print the id
@@ -35,6 +36,7 @@ pub enum Cmd {
     Daemon,
     Run,
     Why(PathBuf),
+    Ui,
     McpServe,
     Init,
     Id,
@@ -186,7 +188,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
     }
     let local = matches!(
         name.as_str(),
-        "init" | "id" | "pair" | "folder" | "config" | "run" | "why"
+        "init" | "id" | "pair" | "folder" | "config" | "run" | "why" | "ui"
     );
     if o.config.is_some() && !local {
         return Err(format!("--config does not apply to {name}"));
@@ -234,6 +236,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
         "run" => {
             arity(0, 0, "no arguments")?;
             Cmd::Run
+        }
+        "ui" => {
+            arity(0, 0, "no arguments")?;
+            Cmd::Ui
         }
         "why" => {
             arity(1, 1, "PATH")?;

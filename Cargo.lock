@@ -4229,6 +4229,7 @@ dependencies = [
  "blake3",
  "chacha20poly1305",
  "ed25519-dalek 2.2.0",
+ "serde_json",
  "tokio",
  "tower-service",
  "vuoxi-chunk",

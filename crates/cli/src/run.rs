@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use vuoxi_config::{Config, DeviceKey};
+use vuoxi_daemon::api;
 use vuoxi_daemon::watch::{self, Watched};
 use vuoxi_daemon::{Event, FolderSpec, Node, NodeConfig, PeerSpec, RulesFilter, parse_tag};
 
@@ -96,6 +97,7 @@ fn go(o: &Opts) -> Result<(), String> {
         })
         .await
         .map_err(|e| format!("start: {e}"))?;
+        let node = Arc::new(node);
         eprintln!(
             "vuoxi: {} listening on {:?}; folders: {}",
             vuoxi_config::encode_id(&node.peer_id()),
@@ -133,7 +135,9 @@ fn go(o: &Opts) -> Result<(), String> {
             .unwrap_or(DEFAULT_POLL_SECS);
         let tx = node.events();
         let ids: Vec<String> = cfg.folders.iter().map(|f| f.id.clone()).collect();
+        let watcher_up = connected.clone();
         tokio::spawn(async move {
+            let connected = watcher_up;
             loop {
                 tokio::time::sleep(Duration::from_secs(secs)).await;
                 if !connected.load(Ordering::Relaxed) {
@@ -143,6 +147,48 @@ fn go(o: &Opts) -> Result<(), String> {
                 }
             }
         });
+
+        let ctx = api::ApiCtx {
+            token: api::token(&cfg.state_dir).map_err(|e| format!("ui token: {e}"))?,
+            device_id: vuoxi_config::encode_id(&node.peer_id()),
+            ui_dir: ui_dir(),
+            peers: cfg
+                .peers
+                .iter()
+                .map(|p| {
+                    let info = api::PeerInfo {
+                        name: p.name.clone(),
+                        id: vuoxi_config::encode_id(&p.id),
+                        addrs: p.addrs.iter().map(|a| a.to_string()).collect(),
+                    };
+                    (p.id, info)
+                })
+                .collect(),
+            folders: cfg
+                .folders
+                .iter()
+                .map(|f| {
+                    let info = api::FolderInfo {
+                        tag: f.tag.clone().unwrap_or_else(|| "code".into()),
+                        peers: f.peers.clone(),
+                        read_only_peers: f.read_only_peers.clone(),
+                    };
+                    (f.id.clone(), info)
+                })
+                .collect(),
+            watcher: connected.clone(),
+            started: std::time::Instant::now(),
+        };
+        let (n, listen) = (node.clone(), cfg.ui_listen);
+        tokio::spawn(async move {
+            if let Err(e) = api::serve(n, Arc::new(ctx), listen).await {
+                eprintln!("vuoxi: dashboard API on {listen}: {e}");
+            }
+        });
+        eprintln!(
+            "vuoxi: dashboard on http://{} (`vuoxi ui` prints the login link)",
+            cfg.ui_listen
+        );
 
         tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;
         eprintln!("vuoxi: stopping");
@@ -192,4 +238,39 @@ fn relay(cfg: &Config, key: DeviceKey, dir: &std::path::Path) -> Result<(), Stri
         t.close().await;
         Ok(())
     })
+}
+
+/// Where the dashboard's files are: `VUOXI_UI_DIR`, else `$XDG_DATA_HOME/vuoxi/ui`.
+pub fn ui_dir() -> std::path::PathBuf {
+    if let Some(d) = std::env::var_os("VUOXI_UI_DIR") {
+        return d.into();
+    }
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                .join(".local/share")
+        });
+    data.join("vuoxi/ui")
+}
+
+/// `vuoxi ui`: print the dashboard's login link.
+pub fn ui_link(o: &Opts) -> i32 {
+    let path = o.config.clone().unwrap_or_else(Config::default_path);
+    match Config::load(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|c| {
+            api::token(&c.state_dir)
+                .map(|t| (c, t))
+                .map_err(|e| e.to_string())
+        }) {
+        Ok((c, t)) => {
+            println!("http://{}/?t={t}", c.ui_listen);
+            0
+        }
+        Err(e) => {
+            eprintln!("vuoxi ui: {e}");
+            1
+        }
+    }
 }
