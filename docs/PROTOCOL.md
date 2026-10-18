@@ -140,3 +140,14 @@ therefore holds the current files plus up to `relay_keep` of replaced chunks;
 a chunk another device stored a moment ago is fresh and survives. When the log
 has more than four records per file, the device sends `Reset`; every device
 then pushes its current state, and superseded manifests are gone.
+
+## Offering folders
+
+Every pull interval a device probes each device it shares a folder with
+(`Pull` with `limit: 0`). A device that lacks the folder answers nothing, and is
+sent `Invite{folder, tag, key, members}`: the folder's tag, its relay key and
+its other members' ids. The receiver lists it as an offer (never from a relay,
+never for a folder it has) until accepted or dismissed; accepting adds the
+folder shared with the inviter and the members it knows. The probe stops once
+the device serves the folder. The key only travels over the authenticated,
+encrypted link between allowlisted devices.
