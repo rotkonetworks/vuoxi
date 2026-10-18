@@ -36,9 +36,32 @@ impl Filter for RulesFilter {
         is_tmp(rel) || matches!(self.0.file(rel), Decision::Skip(_))
     }
 
+    fn relay_ok(&mut self, rel: &RelPath) -> bool {
+        self.0.why(rel, false).policy.relays
+    }
+
     fn touched(&mut self, rel: &RelPath) {
         if rel.file_name() == VUOXI_FILE {
             self.0.invalidate(rel.parent().as_ref());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_files_stay_off_relays() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-rules-relay");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut f = RulesFilter::new(&root, Tag::Code);
+        let ok = |f: &mut RulesFilter, p: &str| f.relay_ok(&RelPath::new(p).unwrap());
+        assert!(ok(&mut f, "src/main.rs"));
+        assert!(!ok(&mut f, "app/.env"));
+        assert!(!ok(&mut f, "keys/id_ed25519"));
+        assert!(
+            !RulesFilter::new(&root, Tag::Secrets).relay_ok(&RelPath::new("notes.txt").unwrap())
+        );
     }
 }

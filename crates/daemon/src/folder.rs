@@ -19,6 +19,10 @@ pub trait Filter: Send {
     fn skip_file(&mut self, root: &Path, rel: &RelPath) -> bool;
     /// `rel` changed on disk; a filter that caches config (`.vuoxi`) drops it here.
     fn touched(&mut self, _rel: &RelPath) {}
+    /// May this file be stored on relays, even sealed?
+    fn relay_ok(&mut self, _rel: &RelPath) -> bool {
+        true
+    }
 }
 
 /// `.git`, cache directories that say so (`CACHEDIR.TAG`), our trash and temp files.
@@ -134,6 +138,10 @@ impl Folder {
 
     pub fn touched(&mut self, rel: &RelPath) {
         self.filter.touched(rel);
+    }
+
+    pub fn relay_ok(&mut self, rel: &RelPath) -> bool {
+        self.filter.relay_ok(rel)
     }
 
     pub fn skip_dir(&mut self, rel: &RelPath) -> bool {

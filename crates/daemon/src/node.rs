@@ -742,8 +742,12 @@ impl Inner {
                 if !seen.insert(p) {
                     continue;
                 }
-                let Some(m) = s.folder.lock().unwrap().manifest(p) else {
-                    continue;
+                let m = {
+                    let mut f = s.folder.lock().unwrap();
+                    match f.manifest(p) {
+                        Some(m) if f.relay_ok(&m.rel) => m,
+                        _ => continue,
+                    }
                 };
                 if self.relay_stash(relay, s, seal, &m.chunks).await? {
                     let put = Wire::Put {
@@ -782,11 +786,13 @@ impl Inner {
         }
 
         let (chunks, files) = {
-            let f = s.folder.lock().unwrap();
+            let mut f = s.folder.lock().unwrap();
+            let live: Vec<Manifest> = f.live().cloned().collect();
             let mut seen = HashSet::new();
-            let chunks: Vec<ChunkId> = f
-                .live()
-                .flat_map(|m| m.chunks.iter().copied())
+            let chunks: Vec<ChunkId> = live
+                .into_iter()
+                .filter(|m| f.relay_ok(&m.rel))
+                .flat_map(|m| m.chunks)
                 .filter(|c| seen.insert(*c))
                 .collect();
             (chunks, f.entries().count() as u64)
