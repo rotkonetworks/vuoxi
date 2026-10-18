@@ -12,9 +12,13 @@
 //! Batch    = 5  epoch:u64 head:u64 n:u32 manifest*n
 //! Put      = 6  folder_len:u8 folder:utf8 blob (rest of body)
 //! Ack      = 7  value:u64
-//! Has      = 8  n:u32 chunk_id*n
+//! Has      = 8  folder_len:u8 folder:utf8 n:u32 chunk_id*n
 //! Missing  = 9  n:u32 chunk_id*n
 //! Blobs    = 10 epoch:u64 head:u64 n:u32 (len:u32 bytes)*n
+//! Stash    = 11 folder_len:u8 folder:utf8 chunk_id:[u8;32] data (rest of body)
+//! Fetch    = 12 folder_len:u8 folder:utf8 chunk_id:[u8;32]
+//! Sweep    = 13 folder_len:u8 folder:utf8 older_than_s:u64
+//! Reset    = 14 folder_len:u8 folder:utf8
 //! manifest = path:u64  rel_len:u32 rel:utf8  size:u64 mode:u32 mtime_ns:i64
 //!            deleted:u8  n_vv:u32 (peer:[u8;32] counter:u64)*n_vv
 //!            n_chunks:u32 (chunk_id:[u8;32])*n_chunks
@@ -97,12 +101,37 @@ pub fn encode_frame(msg: &Wire) -> Result<Vec<u8>, CodecError> {
             body.push(7);
             body.extend_from_slice(&v.to_le_bytes());
         }
-        Wire::Has(ids) | Wire::Missing(ids) => {
-            body.push(if matches!(msg, Wire::Has(_)) { 8 } else { 9 });
-            body.extend_from_slice(&(ids.len() as u32).to_le_bytes());
-            for c in ids {
-                body.extend_from_slice(&c.0);
-            }
+        Wire::Has { folder, ids } => {
+            body.push(8);
+            put_folder(&mut body, folder)?;
+            put_ids(&mut body, ids);
+        }
+        Wire::Missing(ids) => {
+            body.push(9);
+            put_ids(&mut body, ids);
+        }
+        Wire::Stash { folder, id, bytes } => {
+            body.push(11);
+            put_folder(&mut body, folder)?;
+            body.extend_from_slice(&id.0);
+            body.extend_from_slice(bytes);
+        }
+        Wire::Fetch { folder, id } => {
+            body.push(12);
+            put_folder(&mut body, folder)?;
+            body.extend_from_slice(&id.0);
+        }
+        Wire::Sweep {
+            folder,
+            older_than_s,
+        } => {
+            body.push(13);
+            put_folder(&mut body, folder)?;
+            body.extend_from_slice(&older_than_s.to_le_bytes());
+        }
+        Wire::Reset { folder } => {
+            body.push(14);
+            put_folder(&mut body, folder)?;
         }
         Wire::Blobs { epoch, head, blobs } => {
             body.push(10);
@@ -187,18 +216,11 @@ fn decode_body(body: &[u8]) -> Result<Wire, CodecError> {
             blob: std::mem::take(&mut r.0).to_vec(),
         },
         7 => Wire::Ack(r.u64()?),
-        t @ (8 | 9) => {
-            let n = r.count(32)?;
-            let mut ids = Vec::with_capacity(n);
-            for _ in 0..n {
-                ids.push(ChunkId(r.array()?));
-            }
-            if t == 8 {
-                Wire::Has(ids)
-            } else {
-                Wire::Missing(ids)
-            }
-        }
+        8 => Wire::Has {
+            folder: r.folder()?,
+            ids: r.ids()?,
+        },
+        9 => Wire::Missing(r.ids()?),
         10 => {
             let (epoch, head) = (r.u64()?, r.u64()?);
             let n = r.count(4)?;
@@ -209,6 +231,22 @@ fn decode_body(body: &[u8]) -> Result<Wire, CodecError> {
             }
             Wire::Blobs { epoch, head, blobs }
         }
+        11 => Wire::Stash {
+            folder: r.folder()?,
+            id: ChunkId(r.array()?),
+            bytes: std::mem::take(&mut r.0).to_vec(),
+        },
+        12 => Wire::Fetch {
+            folder: r.folder()?,
+            id: ChunkId(r.array()?),
+        },
+        13 => Wire::Sweep {
+            folder: r.folder()?,
+            older_than_s: r.u64()?,
+        },
+        14 => Wire::Reset {
+            folder: r.folder()?,
+        },
         t => return Err(CodecError::BadTag(t)),
     };
     if r.0.is_empty() {
@@ -226,6 +264,13 @@ fn put_folder(out: &mut Vec<u8>, folder: &str) -> Result<(), CodecError> {
     out.push(f.len() as u8);
     out.extend_from_slice(f);
     Ok(())
+}
+
+fn put_ids(out: &mut Vec<u8>, ids: &[ChunkId]) {
+    out.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+    for c in ids {
+        out.extend_from_slice(&c.0);
+    }
 }
 
 fn put_manifest(out: &mut Vec<u8>, m: &Manifest) {
@@ -274,6 +319,10 @@ impl Reader<'_> {
     }
     fn u64(&mut self) -> Result<u64, CodecError> {
         Ok(u64::from_le_bytes(self.array()?))
+    }
+    fn ids(&mut self) -> Result<Vec<ChunkId>, CodecError> {
+        let n = self.count(32)?;
+        (0..n).map(|_| Ok(ChunkId(self.array()?))).collect()
     }
     /// A count of `elem`-byte items, checked against what remains.
     fn count(&mut self, elem: usize) -> Result<usize, CodecError> {
@@ -389,7 +438,26 @@ mod tests {
             blob: vec![1, 2, 3],
         });
         roundtrip(Wire::Ack(u64::MAX));
-        roundtrip(Wire::Has(vec![ChunkId([1; 32]), ChunkId([2; 32])]));
+        roundtrip(Wire::Has {
+            folder: "ab12".into(),
+            ids: vec![ChunkId([1; 32]), ChunkId([2; 32])],
+        });
+        roundtrip(Wire::Stash {
+            folder: "ab12".into(),
+            id: ChunkId([3; 32]),
+            bytes: vec![9; 40],
+        });
+        roundtrip(Wire::Fetch {
+            folder: "ab12".into(),
+            id: ChunkId([3; 32]),
+        });
+        roundtrip(Wire::Sweep {
+            folder: "ab12".into(),
+            older_than_s: 86400,
+        });
+        roundtrip(Wire::Reset {
+            folder: "ab12".into(),
+        });
         roundtrip(Wire::Missing(vec![]));
         roundtrip(Wire::Blobs {
             epoch: 3,

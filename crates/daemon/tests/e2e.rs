@@ -5,7 +5,8 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use vuoxi_core::{PeerId, RelPath};
+use tower_service::Service;
+use vuoxi_core::{PeerId, RelPath, Wire};
 use vuoxi_daemon::{
     BasicFilter, Event, FolderSpec, Node, NodeConfig, PeerSpec, RelayHandler, RelayStore,
 };
@@ -87,6 +88,7 @@ async fn start_ro(me: &Dev, other: &Dev, other_read_only: bool) -> Node {
         pull_every: Duration::from_millis(500),
         power_root: None,
         trash_keep: Duration::from_secs(86400),
+        relay_keep: Duration::from_secs(86400),
     })
     .await
     .unwrap()
@@ -376,6 +378,10 @@ async fn read_only_peer_receives_but_cannot_change() {
 
 /// A device that talks only to the relay `r`.
 async fn start_via_relay(me: &Dev, r: &Dev, key: [u8; 32]) -> Node {
+    start_via_relay_keep(me, r, key, Duration::from_secs(86400)).await
+}
+
+async fn start_via_relay_keep(me: &Dev, r: &Dev, key: [u8; 32], relay_keep: Duration) -> Node {
     Node::start(NodeConfig {
         secret: me.secret,
         bind: vec![format!("127.0.0.1:{}", me.port).parse().unwrap()],
@@ -396,6 +402,7 @@ async fn start_via_relay(me: &Dev, r: &Dev, key: [u8; 32]) -> Node {
         pull_every: Duration::from_millis(300),
         power_root: None,
         trash_keep: Duration::from_secs(86400),
+        relay_keep,
     })
     .await
     .unwrap()
@@ -480,4 +487,92 @@ async fn devices_sync_through_a_relay_that_cannot_read() {
     );
 
     na.shutdown().await;
+}
+
+/// Records in each folder log and sealed chunks the relay holds.
+fn relay_counts(dir: &Path) -> (usize, usize) {
+    let (mut records, mut chunks) = (0, 0);
+    for tag in fs::read_dir(dir).unwrap().flatten() {
+        if let Ok(log) = fs::read(tag.path().join("log")) {
+            let mut at = 0;
+            while at + 4 <= log.len() {
+                at += 4 + u32::from_le_bytes(log[at..at + 4].try_into().unwrap()) as usize;
+                records += 1;
+            }
+        }
+        for shard in fs::read_dir(tag.path().join("chunks"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            chunks += fs::read_dir(shard.path()).unwrap().count();
+        }
+    }
+    (records, chunks)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relay_forgets_old_versions_but_not_current_files() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e/relay-gc");
+    let _ = fs::remove_dir_all(&base);
+    let a = dev(&base, "a", 8);
+    let c = dev(&base, "c", 9);
+    let r = dev(&base, "r", 10);
+    let key = [43u8; 32];
+    fs::create_dir_all(&a.root).unwrap();
+    fs::create_dir_all(&c.root).unwrap();
+    fs::write(a.root.join("keep.txt"), b"unchanged all along").unwrap();
+
+    let mut tc = TransportConfig::new(
+        r.secret,
+        Allowlist::new([id_of(&a.secret), id_of(&c.secret)]),
+    );
+    tc.bind = vec![format!("127.0.0.1:{}", r.port).parse().unwrap()];
+    let relay = IrohTransport::bind(tc).await.unwrap();
+    let store = RelayStore::open(&r.state).unwrap();
+    let _serve = relay.serve(RelayHandler(store.clone()));
+
+    // Housekeeping every second; chunks unnamed for 4 s are dropped.
+    let keep = Duration::from_secs(4);
+    let na = start_via_relay_keep(&a, &r, key, keep).await;
+    for v in 0..300 {
+        fs::write(a.root.join("draft.txt"), format!("version {v}")).unwrap();
+        na.apply_event(FOLDER, Event::Changed(rel("draft.txt")))
+            .await
+            .unwrap();
+        if v % 50 == 0 {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+    }
+    eventually("old chunks are swept", || relay_counts(&r.state).1 <= 3).await;
+
+    // Compaction: the log starts over and A pushes its current state again.
+    let tag = fs::read_dir(&r.state)
+        .unwrap()
+        .flatten()
+        .find(|e| e.path().join("log").exists())
+        .unwrap()
+        .file_name()
+        .into_string()
+        .unwrap();
+    let mut h = RelayHandler(store);
+    let reset = Wire::Reset { folder: tag };
+    assert!(matches!(
+        h.call((id_of(&a.secret), reset)).await.unwrap(),
+        Some(Wire::Ack(_))
+    ));
+    eventually("A pushes again after the reset", || {
+        relay_counts(&r.state).0 == 2
+    })
+    .await;
+
+    // A new device with nothing but the relay gets the current state.
+    let nc = start_via_relay_keep(&c, &r, key, keep).await;
+    eventually("relay alone serves current files", || {
+        fs::read(c.root.join("draft.txt")).ok().as_deref() == Some(b"version 299")
+            && fs::read(c.root.join("keep.txt")).ok().as_deref() == Some(b"unchanged all along")
+    })
+    .await;
+    na.shutdown().await;
+    nc.shutdown().await;
 }

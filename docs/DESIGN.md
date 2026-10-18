@@ -379,7 +379,8 @@ folder.
 - **Read-only peers:** `--ro-peer NAME` on a folder: that peer receives the
   folder but its changes are never accepted here (offers ignored, never pulled).
 - **Mesh-only listening:** set `listen` to the mesh address.
-- **Encrypted relays:** see PROTOCOL.md; a relay stores sealed data only.
+- **Encrypted relays:** see PROTOCOL.md; a relay stores sealed data only, and
+  forgets replaced data after `trash_days` (devices mark what is still in use).
 
 ## Security
 

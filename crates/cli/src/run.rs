@@ -94,6 +94,7 @@ fn go(o: &Opts) -> Result<(), String> {
             pull_every: Duration::from_secs(30),
             power_root: Some("/sys/class/power_supply".into()),
             trash_keep: Duration::from_secs(u64::from(cfg.trash_days) * 86400),
+            relay_keep: Duration::from_secs(u64::from(cfg.trash_days) * 86400),
         })
         .await
         .map_err(|e| format!("start: {e}"))?;

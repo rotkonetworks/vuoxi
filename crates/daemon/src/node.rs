@@ -33,6 +33,10 @@ use vuoxi_layers::{Mode, ModeHandle, PowerState};
 use vuoxi_transport_iroh::{Allowlist, Config as TransportConfig, IrohTransport, Serve};
 
 const PULL_LIMIT: u32 = 256;
+/// Chunk ids per relay `Has`: 1 MiB of ids, well under a frame.
+const MARK_BATCH: usize = 32 * 1024;
+/// Reset a relay's log once it holds this many records per file.
+const COMPACT_FACTOR: u64 = 4;
 /// Chunk requests in flight per file (about 1 MiB at the 64 KiB average chunk).
 const FETCH_WINDOW: usize = 16;
 
@@ -83,6 +87,9 @@ pub struct NodeConfig {
     pub power_root: Option<PathBuf>,
     /// How long files a peer replaced or deleted stay in `.vuoxi-trash`.
     pub trash_keep: Duration,
+    /// How long a relay keeps chunks no device still names: the history a
+    /// relay holds beyond the current files.
+    pub relay_keep: Duration,
 }
 
 struct Shared {
@@ -108,6 +115,7 @@ struct Inner {
     transfers: Mutex<Transfers>,
     /// Local changes to push to relays.
     relay_wake: Notify,
+    relay_keep: Duration,
 }
 
 /// A running device. Dropping it stops serving; [`Node::shutdown`] also closes connections.
@@ -175,6 +183,7 @@ impl Node {
             transfers: Mutex::new(Transfers::default()),
             seals,
             relay_wake: Notify::new(),
+            relay_keep: cfg.relay_keep,
             transport,
             mode,
             state_dir: cfg.state_dir,
@@ -591,11 +600,21 @@ impl Inner {
             .contains(&peer)
             .then(|| self.seals.get(folder))
             .flatten();
-        let ask = seal.map_or(id, |s| s.relay_id(id));
+        let (ask, req) = match seal {
+            Some(s) => {
+                let rid = s.relay_id(id);
+                let req = Wire::Fetch {
+                    folder: s.folder_tag().to_owned(),
+                    id: rid,
+                };
+                (rid, req)
+            }
+            None => (id, Wire::Want(id)),
+        };
         let reply = self
             .transport
             .clone()
-            .call((peer, Wire::Want(ask)))
+            .call((peer, req))
             .await
             .map_err(|e| io::Error::other(e.to_string()))?;
         let bad = || io::Error::other("peer did not supply a valid chunk");
@@ -615,8 +634,10 @@ impl Inner {
         let mut failures = 0u32;
         loop {
             if self.mode.get() != Mode::Hold {
-                let ok = self.relay_push(relay, &folder).await.is_ok()
-                    & self.relay_pull(relay, &folder).await.is_ok();
+                // Pull first: it learns the relay's epoch, which the push needs.
+                let ok = self.relay_pull(relay, &folder).await.is_ok()
+                    && self.relay_push(relay, &folder).await.is_ok()
+                    && self.relay_tend(relay, &folder).await.is_ok();
                 if ok {
                     self.seen(relay);
                 }
@@ -636,32 +657,80 @@ impl Inner {
         self.state_dir.join(folder).join(format!("pushed-{hex}"))
     }
 
+    async fn relay_call(&self, relay: PeerId, w: Wire) -> io::Result<Option<Wire>> {
+        self.transport
+            .clone()
+            .call((relay, w))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
+
+    /// Make sure the relay holds these chunks of the file, uploading what it
+    /// lacks; naming them also marks them as in use. False if a chunk is no
+    /// longer on disk here (the file changed; a newer journal entry covers it).
+    async fn relay_stash(
+        &self,
+        relay: PeerId,
+        s: &Shared,
+        seal: &Seal,
+        chunks: &[ChunkId],
+    ) -> io::Result<bool> {
+        let tag = seal.folder_tag();
+        for batch in chunks.chunks(MARK_BATCH) {
+            let rids: Vec<ChunkId> = batch.iter().map(|c| seal.relay_id(*c)).collect();
+            let has = Wire::Has {
+                folder: tag.to_owned(),
+                ids: rids.clone(),
+            };
+            let missing: HashSet<ChunkId> = match self.relay_call(relay, has).await? {
+                Some(Wire::Missing(ids)) => ids.into_iter().collect(),
+                _ => return Err(io::Error::other("relay did not answer Has")),
+            };
+            for (plain, rid) in batch.iter().zip(&rids) {
+                if !missing.contains(rid) {
+                    continue;
+                }
+                let Some(b) = s.folder.lock().unwrap().read_chunk(*plain) else {
+                    return Ok(false);
+                };
+                let stash = Wire::Stash {
+                    folder: tag.to_owned(),
+                    id: *rid,
+                    bytes: seal.seal_chunk(*plain, &b),
+                };
+                if !matches!(self.relay_call(relay, stash).await?, Some(Wire::Ack(_))) {
+                    return Err(io::Error::other("relay refused a chunk"));
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Send what our journal recorded since the last push: missing chunks
     /// first, then the sealed manifest, so a reader never sees a manifest
     /// whose chunks are not there.
+    ///
+    /// The cursor is kept per relay epoch: when the relay's log starts over
+    /// (a `Reset`, or a relay rebuilt from nothing) we push everything again.
     async fn relay_push(&self, relay: PeerId, folder: &str) -> io::Result<()> {
         let (Some(seal), Ok(s)) = (self.seals.get(folder), self.shared(folder)) else {
             return Ok(());
         };
+        let epoch = self.load_cursor(relay, folder).0;
         let cpath = self.push_cursor_path(relay, folder);
         let mut cur: u64 = std::fs::read_to_string(&cpath)
             .ok()
-            .and_then(|x| x.trim().parse().ok())
+            .and_then(|x| {
+                let (e, c) = x.trim().split_once(' ')?;
+                (e.parse::<u64>().ok()? == epoch).then(|| c.parse().ok())?
+            })
             .unwrap_or(0);
-        let call = |w: Wire| {
-            let mut t = self.transport.clone();
-            async move {
-                t.call((relay, w))
-                    .await
-                    .map_err(|e| io::Error::other(e.to_string()))
-            }
-        };
+        let mut seen = HashSet::new();
         loop {
             let entries = s.folder.lock().unwrap().since(cur, PULL_LIMIT as usize)?;
             let Some(&(last, _)) = entries.last() else {
                 return Ok(());
             };
-            let mut seen = HashSet::new();
             for (_, p) in entries {
                 if !seen.insert(p) {
                     continue;
@@ -669,43 +738,72 @@ impl Inner {
                 let Some(m) = s.folder.lock().unwrap().manifest(p) else {
                     continue;
                 };
-                let rids: Vec<ChunkId> = m.chunks.iter().map(|c| seal.relay_id(*c)).collect();
-                let missing = match call(Wire::Has(rids.clone())).await? {
-                    Some(Wire::Missing(ids)) => ids,
-                    _ => return Err(io::Error::other("relay did not answer Has")),
-                };
-                let mut complete = true;
-                for (plain, rid) in m.chunks.iter().zip(&rids) {
-                    if !missing.contains(rid) {
-                        continue;
-                    }
-                    // The file may have changed since: a newer journal entry covers it.
-                    let Some(b) = s.folder.lock().unwrap().read_chunk(*plain) else {
-                        complete = false;
-                        break;
-                    };
-                    if !matches!(
-                        call(Wire::Chunk(*rid, seal.seal_chunk(*plain, &b))).await?,
-                        Some(Wire::Ack(_))
-                    ) {
-                        return Err(io::Error::other("relay refused a chunk"));
-                    }
-                }
-                if complete {
+                if self.relay_stash(relay, s, seal, &m.chunks).await? {
                     let put = Wire::Put {
                         folder: seal.folder_tag().to_owned(),
                         blob: seal.seal_manifest(&m),
                     };
-                    if !matches!(call(put).await?, Some(Wire::Ack(_))) {
+                    if !matches!(self.relay_call(relay, put).await?, Some(Wire::Ack(_))) {
                         return Err(io::Error::other("relay refused a manifest"));
                     }
                 }
             }
             cur = last;
             let tmp = cpath.with_extension("tmp");
-            std::fs::write(&tmp, format!("{cur}\n"))?;
+            std::fs::write(&tmp, format!("{epoch} {cur}\n"))?;
             std::fs::rename(&tmp, &cpath)?;
         }
+    }
+
+    /// Housekeeping, at most every `relay_keep / 4` (and daily): name every
+    /// chunk of every current file to the relay (re-uploading any it lost),
+    /// then let it drop chunks nobody named for `relay_keep`. A log grown
+    /// well past the folder's size is reset, and everyone pushes afresh.
+    async fn relay_tend(&self, relay: PeerId, folder: &str) -> io::Result<()> {
+        let (Some(seal), Ok(s)) = (self.seals.get(folder), self.shared(folder)) else {
+            return Ok(());
+        };
+        let hex: String = relay.0.iter().map(|b| format!("{b:02x}")).collect();
+        let stamp = self.state_dir.join(folder).join(format!("tended-{hex}"));
+        let now = std::time::SystemTime::now();
+        let every = (self.relay_keep / 4).min(Duration::from_secs(86400));
+        let due = std::fs::metadata(&stamp)
+            .and_then(|m| m.modified())
+            .map_or(true, |t| now.duration_since(t).unwrap_or_default() >= every);
+        if !due {
+            return Ok(());
+        }
+
+        let (chunks, files) = {
+            let f = s.folder.lock().unwrap();
+            let mut seen = HashSet::new();
+            let chunks: Vec<ChunkId> = f
+                .live()
+                .flat_map(|m| m.chunks.iter().copied())
+                .filter(|c| seen.insert(*c))
+                .collect();
+            (chunks, f.entries().count() as u64)
+        };
+        // A chunk that vanished meanwhile belongs to a changed file, which
+        // the next push covers.
+        self.relay_stash(relay, s, seal, &chunks).await?;
+        let sweep = Wire::Sweep {
+            folder: seal.folder_tag().to_owned(),
+            older_than_s: self.relay_keep.as_secs(),
+        };
+        self.relay_call(relay, sweep).await?;
+
+        if self.load_cursor(relay, folder).1 > COMPACT_FACTOR * files.max(64) {
+            let reset = Wire::Reset {
+                folder: seal.folder_tag().to_owned(),
+            };
+            if matches!(self.relay_call(relay, reset).await?, Some(Wire::Ack(_))) {
+                self.relay_pull(relay, folder).await?;
+                self.relay_push(relay, folder).await?;
+            }
+        }
+        std::fs::write(&stamp, b"")?;
+        Ok(())
     }
 
     /// Like [`Inner::pull_once`], from a relay's sealed log.

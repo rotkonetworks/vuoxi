@@ -3,13 +3,19 @@
 //! Per folder (named by an opaque tag, see [`crate::seal`]):
 //!
 //! ```text
-//! <dir>/<tag>/epoch           random u64, fixed when the folder first appears
-//! <dir>/<tag>/log             records: len:u32 LE ‖ sealed manifest
-//! <dir>/<tag>/chunks/<hex>    sealed chunk, named by its relay id
+//! <dir>/<tag>/epoch                random u64, new on every `Reset`
+//! <dir>/<tag>/log                  records: len:u32 LE ‖ sealed manifest
+//! <dir>/<tag>/chunks/<2hex>/<hex>  sealed chunk, named by its relay id
 //! ```
 //!
 //! The log is append-only and fsynced per `Put`; a torn tail is cut on open.
 //! Devices pull it with the same cursor-and-epoch rules as from a peer.
+//!
+//! The relay cannot tell which data is still needed, so devices tell it:
+//! a chunk's mtime is the last time a device stored it or named it in a
+//! `Has`, and `Sweep` drops chunks older than the age a device asks for.
+//! `Reset` empties the log under a new epoch; devices then push what they
+//! hold again.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -44,18 +50,23 @@ fn hex(id: &ChunkId) -> String {
     id.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn new_epoch(dir: &Path) -> io::Result<u64> {
+    let mut b = [0u8; 8];
+    File::open("/dev/urandom")?.read_exact(&mut b)?;
+    let tmp = dir.join("epoch.tmp");
+    let mut f = File::create(&tmp)?;
+    f.write_all(&b)?;
+    f.sync_data()?;
+    fs::rename(tmp, dir.join("epoch"))?;
+    Ok(u64::from_le_bytes(b))
+}
+
 impl Log {
     fn open(dir: &Path) -> io::Result<Log> {
         fs::create_dir_all(dir.join("chunks"))?;
-        let ep = dir.join("epoch");
-        let epoch = match fs::read(&ep) {
+        let epoch = match fs::read(dir.join("epoch")) {
             Ok(b) if b.len() == 8 => u64::from_le_bytes(b.try_into().unwrap()),
-            _ => {
-                let mut b = [0u8; 8];
-                File::open("/dev/urandom")?.read_exact(&mut b)?;
-                fs::write(&ep, b)?;
-                u64::from_le_bytes(b)
-            }
+            _ => new_epoch(dir)?,
         };
         let mut file = OpenOptions::new()
             .read(true)
@@ -92,6 +103,18 @@ impl Log {
         self.offsets.push(self.end);
         self.end += rec.len() as u64;
         Ok(self.offsets.len() as u64)
+    }
+
+    /// Empty the log under a new epoch. The epoch is written first: a crash
+    /// in between leaves an old log under a new epoch, which devices simply
+    /// pull again.
+    fn reset(&mut self, dir: &Path) -> io::Result<u64> {
+        self.epoch = new_epoch(dir)?;
+        self.file.set_len(0)?;
+        self.file.sync_data()?;
+        self.offsets.clear();
+        self.end = 0;
+        Ok(self.epoch)
     }
 
     fn since(&self, since: u64, limit: usize) -> io::Result<(u64, Vec<Vec<u8>>)> {
@@ -144,11 +167,46 @@ impl RelayStore {
         Ok(l)
     }
 
-    /// Chunks are stored for every folder in one place: the relay id is keyed
-    /// per folder already, and one directory keeps lookups simple.
-    fn chunk_path(&self, id: &ChunkId) -> PathBuf {
+    fn chunks_dir(&self, tag: &str) -> io::Result<PathBuf> {
+        if !valid_tag(tag) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "bad folder tag",
+            ));
+        }
+        Ok(self.dir.join(tag).join("chunks"))
+    }
+
+    fn chunk_path(&self, tag: &str, id: &ChunkId) -> io::Result<PathBuf> {
         let h = hex(id);
-        self.dir.join("chunks").join(&h[..2]).join(h)
+        Ok(self.chunks_dir(tag)?.join(&h[..2]).join(h))
+    }
+
+    /// Mark a chunk as still in use; false if it is not here.
+    fn touch(p: &Path) -> bool {
+        File::open(p)
+            .and_then(|f| f.set_modified(std::time::SystemTime::now()))
+            .is_ok()
+    }
+
+    fn sweep(&self, tag: &str, older_than: std::time::Duration) -> io::Result<u64> {
+        let cutoff = std::time::SystemTime::now() - older_than;
+        let mut gone = 0;
+        let Ok(shards) = fs::read_dir(self.chunks_dir(tag)?) else {
+            return Ok(0);
+        };
+        for shard in shards.flatten() {
+            for f in fs::read_dir(shard.path())?.flatten() {
+                let old = f
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t < cutoff);
+                if old && fs::remove_file(f.path()).is_ok() {
+                    gone += 1;
+                }
+            }
+        }
+        Ok(gone)
     }
 
     fn handle(&self, w: Wire) -> io::Result<Option<Wire>> {
@@ -173,14 +231,18 @@ impl RelayStore {
                     blobs,
                 })
             }
-            Wire::Has(ids) => Some(Wire::Missing(
-                ids.into_iter()
-                    .filter(|id| !self.chunk_path(id).is_file())
-                    .collect(),
-            )),
-            Wire::Chunk(id, bytes) if bytes.len() <= MAX_BLOB => {
-                let p = self.chunk_path(&id);
-                if !p.is_file() {
+            Wire::Has { folder, ids } => {
+                let mut missing = Vec::new();
+                for id in ids {
+                    if !Self::touch(&self.chunk_path(&folder, &id)?) {
+                        missing.push(id);
+                    }
+                }
+                Some(Wire::Missing(missing))
+            }
+            Wire::Stash { folder, id, bytes } if bytes.len() <= MAX_BLOB => {
+                let p = self.chunk_path(&folder, &id)?;
+                if !Self::touch(&p) {
                     fs::create_dir_all(p.parent().unwrap())?;
                     let tmp = p.with_extension("tmp");
                     let mut f = File::create(&tmp)?;
@@ -190,9 +252,20 @@ impl RelayStore {
                 }
                 Some(Wire::Ack(0))
             }
-            Wire::Want(id) => fs::read(self.chunk_path(&id))
+            Wire::Fetch { folder, id } => fs::read(self.chunk_path(&folder, &id)?)
                 .ok()
                 .map(|b| Wire::Chunk(id, b)),
+            Wire::Sweep {
+                folder,
+                older_than_s,
+            } => Some(Wire::Ack(
+                self.sweep(&folder, std::time::Duration::from_secs(older_than_s))?,
+            )),
+            Wire::Reset { folder } => {
+                let log = self.log(&folder)?;
+                let epoch = log.lock().unwrap().reset(&self.dir.join(&folder))?;
+                Some(Wire::Ack(epoch))
+            }
             _ => None,
         })
     }
@@ -289,22 +362,56 @@ mod tests {
         );
     }
 
+    fn has(s: &RelayStore, ids: Vec<ChunkId>) -> Option<Wire> {
+        s.handle(Wire::Has {
+            folder: TAG.into(),
+            ids,
+        })
+        .unwrap()
+    }
+
+    fn age(s: &RelayStore, id: &ChunkId, secs: u64) {
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+        let f = File::open(s.chunk_path(TAG, id).unwrap()).unwrap();
+        f.set_modified(t).unwrap();
+    }
+
     #[test]
     fn chunks_and_bad_tags() {
         let s = RelayStore::open(&dir("chunks")).unwrap();
         let id = ChunkId([5; 32]);
+        assert_eq!(has(&s, vec![id]), Some(Wire::Missing(vec![id])));
+        s.handle(Wire::Stash {
+            folder: TAG.into(),
+            id,
+            bytes: b"sealed".to_vec(),
+        })
+        .unwrap();
+        assert_eq!(has(&s, vec![id]), Some(Wire::Missing(vec![])));
         assert_eq!(
-            s.handle(Wire::Has(vec![id])).unwrap(),
-            Some(Wire::Missing(vec![id]))
-        );
-        s.handle(Wire::Chunk(id, b"sealed".to_vec())).unwrap();
-        assert_eq!(
-            s.handle(Wire::Has(vec![id])).unwrap(),
-            Some(Wire::Missing(vec![]))
-        );
-        assert_eq!(
-            s.handle(Wire::Want(id)).unwrap(),
+            s.handle(Wire::Fetch {
+                folder: TAG.into(),
+                id
+            })
+            .unwrap(),
             Some(Wire::Chunk(id, b"sealed".to_vec()))
+        );
+        let other = "ffeeddccbbaa99887766554433221100";
+        assert_eq!(
+            s.handle(Wire::Fetch {
+                folder: other.into(),
+                id
+            })
+            .unwrap(),
+            None,
+            "chunks are per folder"
+        );
+        assert!(
+            s.handle(Wire::Fetch {
+                folder: "../etc".into(),
+                id
+            })
+            .is_err()
         );
         assert!(
             s.handle(Wire::Put {
@@ -313,5 +420,76 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn sweep_drops_only_chunks_nobody_named() {
+        let s = RelayStore::open(&dir("sweep")).unwrap();
+        let (kept, dropped, fresh) = (ChunkId([1; 32]), ChunkId([2; 32]), ChunkId([3; 32]));
+        for id in [kept, dropped, fresh] {
+            s.handle(Wire::Stash {
+                folder: TAG.into(),
+                id,
+                bytes: vec![0; 10],
+            })
+            .unwrap();
+        }
+        age(&s, &kept, 3600);
+        age(&s, &dropped, 3600);
+        has(&s, vec![kept]); // a device still uses it
+        let sweep = |s: &RelayStore| {
+            s.handle(Wire::Sweep {
+                folder: TAG.into(),
+                older_than_s: 600,
+            })
+            .unwrap()
+        };
+        assert_eq!(sweep(&s), Some(Wire::Ack(1)));
+        assert_eq!(
+            has(&s, vec![kept, dropped, fresh]),
+            Some(Wire::Missing(vec![dropped]))
+        );
+        // storing a chunk that is already there marks it too
+        age(&s, &fresh, 3600);
+        s.handle(Wire::Stash {
+            folder: TAG.into(),
+            id: fresh,
+            bytes: vec![0; 10],
+        })
+        .unwrap();
+        assert_eq!(sweep(&s), Some(Wire::Ack(0)));
+    }
+
+    #[test]
+    fn reset_starts_a_new_epoch() {
+        let d = dir("reset");
+        let s = RelayStore::open(&d).unwrap();
+        let put = |s: &RelayStore| {
+            s.handle(Wire::Put {
+                folder: TAG.into(),
+                blob: vec![1; 3],
+            })
+            .unwrap()
+        };
+        put(&s);
+        put(&s);
+        let Some(Wire::Ack(epoch)) = s.handle(Wire::Reset { folder: TAG.into() }).unwrap() else {
+            panic!()
+        };
+        assert_eq!(put(&s), Some(Wire::Ack(1)));
+        drop(s);
+        let s = RelayStore::open(&d).unwrap();
+        let Some(Wire::Blobs { epoch: e, head, .. }) = s
+            .handle(Wire::Pull {
+                folder: TAG.into(),
+                epoch: 0,
+                since: 0,
+                limit: 10,
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((e, head), (epoch, 1));
     }
 }

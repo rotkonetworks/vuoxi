@@ -82,7 +82,9 @@ vuoxi folder key notes          # on the device that created the folder
 # then `key = "<that hex>"` in the folder's [[folder]] block on the others
 ```
 
-Firewall the relay so only your devices reach UDP 41641.
+Firewall the relay so only your devices reach UDP 41641. It keeps your current
+files plus replaced data for `trash_days` (30 by default); give its storage a
+quota anyway.
 
 ## Dashboard
 

@@ -109,3 +109,34 @@ The disk is the source of truth; deferral only delays reading it.
 Symlinks, devices, sockets, empty directories, our temp files
 (`.<name>.vuoxi-tmp`), and whatever the folder's rules skip (see DESIGN.md:
 `CACHEDIR.TAG`, build output beside its manifest, `.git`, `.vuoxi` patterns).
+
+## Relays
+
+A relay stores a folder it cannot read (see `crates/daemon/src/seal.rs`). It
+knows the folder only by a keyed tag; it stores sealed manifests in an
+append-only log and sealed chunks named by a keyed hash. Messages, all scoped by
+that tag:
+
+| message | answer | |
+|---|---|---|
+| `Put{folder, blob}` | `Ack(head)` | append a sealed manifest |
+| `Pull{folder, epoch, since, limit}` | `Blobs{epoch, head, blobs}` | read the log, same cursor rules as a peer |
+| `Has{folder, ids}` | `Missing(ids)` | which chunks are absent; present ones count as in use |
+| `Stash{folder, id, bytes}` | `Ack(0)` | store a sealed chunk |
+| `Fetch{folder, id}` | `Chunk(id, bytes)` | read a sealed chunk |
+| `Sweep{folder, older_than_s}` | `Ack(removed)` | drop chunks unused for that long |
+| `Reset{folder}` | `Ack(epoch)` | empty the log under a new epoch |
+
+A device pulls the relay's log, then pushes its journal since its push cursor:
+chunks first (`Has`, then `Stash` for the missing), then the manifest. The push
+cursor is stored with the relay epoch it belongs to, so after a `Reset` (or a
+relay that lost everything) the device pushes its whole current state again.
+
+**Retention.** The relay cannot tell old data from current, so devices tell it.
+At most daily (and every `relay_keep / 4`), a device names every chunk of its
+current files in `Has`, re-uploading any the relay lost, then sends
+`Sweep{older_than_s: relay_keep}` (`trash_days`, default 30 days). A relay
+therefore holds the current files plus up to `relay_keep` of replaced chunks;
+a chunk another device stored a moment ago is fresh and survives. When the log
+has more than four records per file, the device sends `Reset`; every device
+then pushes its current state, and superseded manifests are gone.

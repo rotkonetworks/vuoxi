@@ -146,10 +146,15 @@ pub enum Wire {
         folder: String,
         blob: Vec<u8>,
     },
-    /// Acknowledges a `Put` (with the new log head) or an uploaded `Chunk`.
+    /// Acknowledges a `Put` (with the new log head), a `Stash`, a `Sweep`
+    /// (with the number of chunks removed) or a `Reset` (with the new epoch).
     Ack(u64),
-    /// Which of these chunks does the relay lack?
-    Has(Vec<ChunkId>),
+    /// Which of these chunks of `folder` does the relay lack? Those it has
+    /// count as still in use, which keeps them from the next `Sweep`.
+    Has {
+        folder: String,
+        ids: Vec<ChunkId>,
+    },
     /// Answer to `Has`.
     Missing(Vec<ChunkId>),
     /// Answer to `Pull` from a relay: log entries after the cursor.
@@ -157,6 +162,29 @@ pub enum Wire {
         epoch: u64,
         head: u64,
         blobs: Vec<Vec<u8>>,
+    },
+    /// Store an encrypted chunk of `folder` on a relay.
+    Stash {
+        folder: String,
+        id: ChunkId,
+        bytes: Vec<u8>,
+    },
+    /// Ask a relay for a chunk of `folder`; answered with `Chunk`.
+    Fetch {
+        folder: String,
+        id: ChunkId,
+    },
+    /// Drop the chunks of `folder` that nobody stored or named in a `Has`
+    /// for `older_than_s` seconds.
+    Sweep {
+        folder: String,
+        older_than_s: u64,
+    },
+    /// Start `folder`'s log over under a new epoch. Devices notice the epoch
+    /// change and push their current state again: this is how a log of
+    /// superseded versions is compacted by someone who can read it.
+    Reset {
+        folder: String,
     },
 }
 
