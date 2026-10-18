@@ -635,9 +635,16 @@ impl Inner {
         loop {
             if self.mode.get() != Mode::Hold {
                 // Pull first: it learns the relay's epoch, which the push needs.
-                let ok = self.relay_pull(relay, &folder).await.is_ok()
-                    && self.relay_push(relay, &folder).await.is_ok()
-                    && self.relay_tend(relay, &folder).await.is_ok();
+                let r = async {
+                    self.relay_pull(relay, &folder).await?;
+                    self.relay_push(relay, &folder).await?;
+                    self.relay_tend(relay, &folder).await
+                }
+                .await;
+                if let (Err(e), 0) = (&r, failures) {
+                    eprintln!("vuoxi: {folder}: relay: {e}");
+                }
+                let ok = r.is_ok();
                 if ok {
                     self.seen(relay);
                 }
