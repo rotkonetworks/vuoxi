@@ -33,6 +33,8 @@ use vuoxi_layers::{Mode, ModeHandle, PowerState};
 use vuoxi_transport_iroh::{Allowlist, Config as TransportConfig, IrohTransport, Serve};
 
 const PULL_LIMIT: u32 = 256;
+/// Chunk requests in flight per file (about 1 MiB at the 64 KiB average chunk).
+const FETCH_WINDOW: usize = 16;
 
 /// A change the detector saw, relative to a folder root.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -552,13 +554,21 @@ impl Inner {
         offsets: &mut Vec<ChunkEntry>,
         t: u64,
     ) -> io::Result<()> {
+        use futures_util::stream::{self, StreamExt, TryStreamExt};
+        // Chunks we already hold are read locally; the rest are requested
+        // FETCH_WINDOW at a time (one round trip per window, not per chunk) and
+        // written strictly in order.
+        let mut chunks = stream::iter(m.chunks.iter().copied())
+            .map(|id| async move {
+                let local = s.folder.lock().unwrap().read_chunk(id);
+                match local {
+                    Some(b) => Ok((id, b)),
+                    None => self.fetch_chunk(peer, folder, id).await.map(|b| (id, b)),
+                }
+            })
+            .buffered(FETCH_WINDOW);
         let mut at = 0u64;
-        for &id in &m.chunks {
-            let local = s.folder.lock().unwrap().read_chunk(id);
-            let bytes = match local {
-                Some(b) => b,
-                None => self.fetch_chunk(peer, folder, id).await?,
-            };
+        while let Some((id, bytes)) = chunks.try_next().await? {
             staged.write(&bytes)?;
             offsets.push((id, at, bytes.len()));
             at += bytes.len() as u64;

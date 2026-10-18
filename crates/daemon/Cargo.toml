@@ -18,6 +18,7 @@ vuoxi-watcher.workspace = true
 tower-service.workspace = true
 blake3.workspace = true
 serde_json.workspace = true
+futures-util.workspace = true
 chacha20poly1305.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 

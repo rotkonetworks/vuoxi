@@ -21,3 +21,8 @@ export function date(ms: number): string {
 export const dateNs = (ns: number) => date(ns / 1e6)
 export const dateS = (s: number) => date(s * 1000)
 export const dur = (s: number) => ago(s)
+
+/** First 8 and last 4 characters of a device id; the full id goes in a title. */
+export function shortId(id: string): string {
+  return id.length > 14 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+}

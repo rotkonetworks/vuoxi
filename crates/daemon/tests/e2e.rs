@@ -29,12 +29,22 @@ fn id_of(secret: &[u8; 32]) -> PeerId {
     )
 }
 
+/// A port nothing else in this test binary has been given: the kernel may
+/// hand a just-released ephemeral port out again, so remember them all.
 fn free_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static USED: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let p = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut used = USED.lock().unwrap();
+        if !used.contains(&p) {
+            used.push(p);
+            return p;
+        }
+    }
 }
 
 fn dev(base: &Path, name: &str, seed: u8) -> Dev {
@@ -171,7 +181,7 @@ async fn two_devices_converge() {
     fs::write(b.root.join("only-b.md"), b"from b").unwrap();
 
     let na = start(&a, &b).await;
-    let mut nb = start(&b, &a).await;
+    let nb = start(&b, &a).await;
     na.sync_now();
     nb.sync_now();
     eventually("first import", || {
@@ -289,12 +299,14 @@ async fn two_devices_converge() {
     assert_eq!(copy.1, b"from a", "the other edit is kept beside it");
 
     // Restart: B misses a change while down and catches up from its cursor.
+    // Dropping the node releases its socket, so the restart can bind the port.
     nb.shutdown().await;
+    drop(nb);
     fs::write(a.root.join("while-down.txt"), b"missed").unwrap();
     na.apply_event(FOLDER, Event::Changed(rel("while-down.txt")))
         .await
         .unwrap();
-    nb = start(&b, &a).await;
+    let nb = start(&b, &a).await;
     nb.sync_now();
     eventually("catch up after restart", || {
         fs::read(b.root.join("while-down.txt")).ok().as_deref() == Some(b"missed")
@@ -438,6 +450,7 @@ async fn devices_sync_through_a_relay_that_cannot_read() {
 
     // B changes something and goes away; A, starting later, still gets it.
     na.shutdown().await;
+    drop(na);
     fs::write(b.root.join("diary.txt"), b"SECRET-EDIT-WHILE-A-SLEPT").unwrap();
     nb.apply_event(FOLDER, Event::Changed(rel("diary.txt")))
         .await

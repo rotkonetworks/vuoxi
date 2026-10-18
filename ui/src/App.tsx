@@ -2,7 +2,7 @@ import {
   For, Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
 } from 'solid-js'
 import { api, ApiError, MODES, type Mode, type Peer, type Status, type Transfer } from './api'
-import { ago, bytes, date, dateNs, dateS } from './fmt'
+import { ago, bytes, date, dateNs, dateS, shortId } from './fmt'
 
 type Tab = 'transfers' | 'files' | 'changes' | 'trash' | 'conflicts'
 const TABS: [Tab, string][] = [
@@ -89,7 +89,7 @@ export default function App() {
             <tbody>
               <For each={status()?.peers} fallback={<tr><td colspan="2" class="muted">none</td></tr>}>{p =>
                 <tr>
-                  <td>{p.name}{p.relay && <span class="relay">relay</span>}<br /><span class="mono muted">{p.id}</span></td>
+                  <td>{p.name}{p.relay && <span class="relay">relay</span>}<br /><span class="mono muted" title={p.id}>{shortId(p.id)}</span></td>
                   <td><span class={'dot ' + seen(p)} />{ago(p.last_seen_s)}</td>
                 </tr>}
               </For>
