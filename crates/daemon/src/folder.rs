@@ -144,6 +144,11 @@ impl Folder {
         self.filter.touched(rel);
     }
 
+    /// Whether some file here is known to hold this chunk.
+    pub fn has_chunk(&self, id: &ChunkId) -> bool {
+        self.chunk_refs.contains_key(id)
+    }
+
     pub fn relay_ok(&mut self, rel: &RelPath) -> bool {
         self.filter.relay_ok(rel)
     }

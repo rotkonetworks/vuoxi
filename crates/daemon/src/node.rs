@@ -33,6 +33,10 @@ use vuoxi_layers::{Mode, ModeHandle, PowerState};
 use vuoxi_transport_iroh::{Allowlist, Config as TransportConfig, IrohTransport, Serve};
 
 const PULL_LIMIT: u32 = 256;
+/// Prefetch: chunks in flight, largest file considered, bytes per batch.
+const PREFETCH_WINDOW: usize = 64;
+const PREFETCH_FILE: u64 = 4 << 20;
+const PREFETCH_BYTES: u64 = 64 << 20;
 /// Files hashed at once while reconciling a folder.
 const SCAN_WINDOW: usize = 4;
 /// Versions per index commit and journal fsync while reconciling.
@@ -120,6 +124,8 @@ struct Inner {
     /// Local changes to push to relays.
     relay_wake: Notify,
     relay_keep: Duration,
+    /// Chunks fetched ahead for a batch being applied, verified already.
+    prefetched: Mutex<HashMap<ChunkId, Vec<u8>>>,
 }
 
 /// A running device. Dropping it stops serving; [`Node::shutdown`] also closes connections.
@@ -188,6 +194,7 @@ impl Node {
             seals,
             relay_wake: Notify::new(),
             relay_keep: cfg.relay_keep,
+            prefetched: Mutex::new(HashMap::new()),
             transport,
             mode,
             state_dir: cfg.state_dir,
@@ -631,8 +638,64 @@ impl Inner {
             .insert(peer, std::time::Instant::now());
     }
 
+    /// Fetch, many at a time, the chunks of the small files in a batch that
+    /// we do not hold, so applying the batch one file at a time does not cost
+    /// a round trip per file. Returns what to [`Inner::forget`] afterwards.
+    /// Failures are left for the normal fetch to retry.
+    async fn prefetch(&self, peer: PeerId, folder: &str, ms: &[Manifest]) -> Vec<ChunkId> {
+        use futures_util::stream::{self, StreamExt};
+        let Ok(s) = self.shared(folder) else {
+            return Vec::new();
+        };
+        let want: Vec<ChunkId> = {
+            let f = s.folder.lock().unwrap();
+            let mut seen = HashSet::new();
+            let mut budget = PREFETCH_BYTES;
+            let mut want = Vec::new();
+            for m in ms {
+                if m.meta.deleted || m.meta.size > PREFETCH_FILE || !f.owns(m) {
+                    continue;
+                }
+                if m.meta.size > budget {
+                    break;
+                }
+                budget -= m.meta.size;
+                want.extend(
+                    m.chunks
+                        .iter()
+                        .filter(|c| !f.has_chunk(c) && seen.insert(**c)),
+                );
+            }
+            want
+        };
+        let got: Vec<(ChunkId, Vec<u8>)> = stream::iter(want)
+            .map(|id| async move {
+                self.fetch_chunk(peer, folder, id)
+                    .await
+                    .ok()
+                    .map(|b| (id, b))
+            })
+            .buffer_unordered(PREFETCH_WINDOW)
+            .filter_map(|x| async move { x })
+            .collect()
+            .await;
+        let ids = got.iter().map(|(id, _)| *id).collect();
+        self.prefetched.lock().unwrap().extend(got);
+        ids
+    }
+
+    fn forget(&self, ids: &[ChunkId]) {
+        let mut p = self.prefetched.lock().unwrap();
+        for id in ids {
+            p.remove(id);
+        }
+    }
+
     /// One chunk from a peer, verified; from a relay, unsealed and verified.
     async fn fetch_chunk(&self, peer: PeerId, folder: &str, id: ChunkId) -> io::Result<Vec<u8>> {
+        if let Some(b) = self.prefetched.lock().unwrap().remove(&id) {
+            return Ok(b);
+        }
         let seal = self
             .relays
             .contains(&peer)
@@ -883,14 +946,27 @@ impl Inner {
                 cur = (epoch, 0);
             }
             let more = head > cur.1 && !blobs.is_empty();
-            for b in blobs {
-                // A blob that does not open is not ours to apply; skip it.
-                let Ok(m) = seal.open_manifest(&b) else {
-                    continue;
-                };
-                if !self.apply_remote(relay, folder, m).await? {
-                    return Ok(());
+            // A blob that does not open is not ours to apply; skip it.
+            let ms: Vec<Manifest> = blobs
+                .iter()
+                .filter_map(|b| seal.open_manifest(b).ok())
+                .collect();
+            let ahead = self.prefetch(relay, folder, &ms).await;
+            let mut stopped = false;
+            for m in ms {
+                match self.apply_remote(relay, folder, m).await {
+                    Ok(true) => {}
+                    r => {
+                        self.forget(&ahead);
+                        r?;
+                        stopped = true;
+                        break;
+                    }
                 }
+            }
+            self.forget(&ahead);
+            if stopped {
+                return Ok(());
             }
             cur = (epoch, head);
             self.save_cursor(relay, folder, cur)?;
@@ -985,10 +1061,22 @@ impl Inner {
                 }
             }
             let full = manifests.len() >= PULL_LIMIT as usize;
+            let ahead = self.prefetch(peer, folder, &manifests).await;
+            let mut stopped = false;
             for m in manifests {
-                if !self.apply_remote(peer, folder, m).await? {
-                    return Ok(());
+                match self.apply_remote(peer, folder, m).await {
+                    Ok(true) => {}
+                    r => {
+                        self.forget(&ahead);
+                        r?;
+                        stopped = true;
+                        break;
+                    }
                 }
+            }
+            self.forget(&ahead);
+            if stopped {
+                return Ok(());
             }
             cur = (epoch, head);
             self.save_cursor(peer, folder, cur)?;
