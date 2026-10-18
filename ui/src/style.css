@@ -1,0 +1,44 @@
+* { box-sizing: border-box; }
+body { font-family: Arial, Helvetica, sans-serif; font-size: 13px; background: #fff; color: #000; margin: 0; padding: 10px 10px 40px; }
+h1 { background: #000066; color: #fff; padding: 6px 12px; margin: 0 0 2px; font-size: 18px; font-weight: bold; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+h1 small { font-size: 12px; font-weight: normal; font-family: monospace; }
+h1 .sp { flex: 1; }
+h1 label, h1 span { font-size: 12px; font-weight: normal; }
+h2 { background: #ddd; padding: 4px 12px; margin: 0 0 6px; font-size: 12px; font-weight: bold; }
+.status { padding: 6px 10px; margin: 8px 0; border: 1px solid #000; font-size: 12px; }
+.status.ok { background: #cfc; border-color: #080; }
+.status.warn { background: #ffc; border-color: #880; }
+.status.err { background: #fcc; border-color: #800; }
+button { background: #f0f0f0; color: #000; border: 1px solid #666; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+button:hover { background: #e0e0e0; }
+button:disabled { background: #ccc; color: #666; cursor: default; }
+select, input[type=text] { border: 1px solid #666; padding: 2px 4px; font-size: 12px; }
+table { width: 100%; border-collapse: collapse; border: 1px solid #000; margin: 4px 0 8px; }
+th { background: #000066; color: #fff; padding: 3px 8px; text-align: left; border: 1px solid #000; white-space: nowrap; }
+th.s { cursor: pointer; }
+td { padding: 3px 8px; border: 1px solid #999; background: #f8f8f8; }
+tr:nth-child(even) td { background: #fff; }
+td.r, th.r { text-align: right; }
+td.rel { word-break: break-all; }
+tr.sel td { background: #cce !important; }
+tr.click { cursor: pointer; }
+.layout { display: flex; gap: 10px; align-items: flex-start; }
+.side { width: 230px; flex: none; }
+.main { flex: 1; min-width: 0; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid #000; margin-bottom: 6px; }
+.tabs a { padding: 4px 12px; background: #ddd; border: 1px solid #999; border-bottom: 0; cursor: pointer; color: #000066; }
+.tabs a.on { background: #000066; color: #fff; font-weight: bold; border-color: #000066; }
+.bar { background: #f3f3f3; border: 1px solid #ccc; padding: 6px 8px; margin: 0 0 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.pb { border: 1px solid #000; background: #fff; width: 120px; height: 14px; position: relative; display: inline-block; vertical-align: middle; }
+.pb i { display: block; height: 100%; background: #6c6; }
+.pb.failed i { background: #c66; }
+.pb b { position: absolute; left: 0; right: 0; top: 0; text-align: center; font-size: 10px; line-height: 12px; font-weight: normal; }
+.dot { display: inline-block; width: 9px; height: 9px; border: 1px solid #000; margin-right: 5px; }
+.dot.g { background: #3c3; } .dot.y { background: #fc3; } .dot.r { background: #e33; }
+.tag { color: #555; font-size: 11px; }
+.relay { border: 1px solid #666; background: #ffc; font-size: 10px; padding: 0 3px; margin-left: 4px; }
+.mono { font-family: monospace; font-size: 12px; }
+.del { color: #800; text-decoration: line-through; }
+.muted { color: #666; }
+.statusbar { position: fixed; left: 0; right: 0; bottom: 0; background: #ddd; border-top: 1px solid #000; padding: 5px 12px; font-size: 12px; display: flex; gap: 20px; flex-wrap: wrap; }
+@media (max-width: 700px) { .layout { flex-direction: column; } .side { width: 100%; } }
