@@ -70,6 +70,10 @@ const CLOSE_IDLE: u32 = 0;
 const CLOSE_DENIED: u32 = 403;
 const CLOSE_PROTOCOL: u32 = 400;
 const MAX_STREAMS: u32 = 16;
+/// A peer that does not complete a handshake in this long is treated as down.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+/// One request (a chunk is at most a few MiB) must finish in this long.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn terr(e: impl std::fmt::Display) -> Error {
     Error::Transport(e.to_string())
@@ -237,19 +241,34 @@ impl IrohTransport {
     }
 
     async fn connection(&self, peer: PeerId, fresh: bool) -> Result<Connection, Error> {
-        let mut conns = self.0.conns.lock().await;
-        if let Some(c) = conns.get(&peer) {
-            if !fresh && c.conn.close_reason().is_none() {
-                *c.last_used.lock().unwrap() = Instant::now();
-                return Ok(c.conn.clone());
+        {
+            let mut conns = self.0.conns.lock().await;
+            if let Some(c) = conns.get(&peer) {
+                if !fresh && c.conn.close_reason().is_none() {
+                    *c.last_used.lock().unwrap() = Instant::now();
+                    return Ok(c.conn.clone());
+                }
+                conns.remove(&peer);
             }
-            conns.remove(&peer);
         }
+        // Dial without holding the cache: a peer that is down must not stall
+        // requests to every other peer while its handshake times out.
         let ips = self.0.addrs.lock().unwrap().get(&peer).cloned();
         let ips = ips.ok_or_else(|| terr("no known address for peer"))?;
         let id = PublicKey::from_bytes(&peer.0).map_err(terr)?;
         let addr = EndpointAddr::new(id).with_addrs(ips.into_iter().map(iroh::TransportAddr::Ip));
-        let conn = self.0.endpoint.connect(addr, ALPN).await.map_err(terr)?;
+        let conn = tokio::time::timeout(CONNECT_TIMEOUT, self.0.endpoint.connect(addr, ALPN))
+            .await
+            .map_err(|_| terr("connect timed out"))?
+            .map_err(terr)?;
+        let mut conns = self.0.conns.lock().await;
+        if let Some(c) = conns.get(&peer)
+            && c.conn.close_reason().is_none()
+        {
+            // Another request dialled first; keep one connection per peer.
+            conn.close(VarInt::from_u32(CLOSE_IDLE), b"duplicate");
+            return Ok(c.conn.clone());
+        }
         let last_used = Arc::new(Mutex::new(Instant::now()));
         if let Some(idle) = self.0.idle_close {
             tokio::spawn(reap(conn.clone(), last_used.clone(), idle));
@@ -273,9 +292,10 @@ impl IrohTransport {
         // A cached connection may have died since last use; retry once on a new one.
         for fresh in [false, true] {
             let conn = self.connection(peer, fresh).await?;
-            match exchange(&conn, &frame).await {
-                Ok(r) => return Ok(r),
-                Err(e) => last = Some(e),
+            match tokio::time::timeout(REQUEST_TIMEOUT, exchange(&conn, &frame)).await {
+                Ok(Ok(r)) => return Ok(r),
+                Ok(Err(e)) => last = Some(e),
+                Err(_) => last = Some(terr("request timed out")),
             }
         }
         Err(last.expect("loop ran"))

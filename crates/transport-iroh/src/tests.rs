@@ -119,3 +119,43 @@ async fn idle_connections_are_closed() {
     a.close().await;
     b.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dead_peer_does_not_stall_a_live_one() {
+    let allow = Allowlist::new([id(1), id(2), id(3)]);
+    let (a, b) = (node(1, &allow).await, node(2, &allow).await);
+    let _serve = b.serve(Echoer);
+    a.add_peer(b.peer_id(), b.local_addrs());
+    // Peer 3 is known but nothing listens at its address.
+    let dead = std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    a.add_peer(id(3), vec![dead]);
+
+    let mut to_dead = a.clone();
+    let stuck =
+        tokio::spawn(async move { to_dead.call((id(3), Wire::Want(ChunkId([1; 32])))).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let started = std::time::Instant::now();
+    let mut to_live = a.clone();
+    let got = to_live
+        .call((b.peer_id(), Wire::Want(ChunkId([2; 32]))))
+        .await
+        .unwrap();
+    assert!(matches!(got, Some(Wire::Chunk(..))));
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "live peer waited {:?}",
+        started.elapsed()
+    );
+
+    let r = tokio::time::timeout(Duration::from_secs(30), stuck).await;
+    assert!(
+        matches!(r, Ok(Ok(Err(_)))),
+        "the dead peer fails within the connect timeout"
+    );
+    a.close().await;
+    b.close().await;
+}

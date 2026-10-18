@@ -545,16 +545,14 @@ impl Inner {
     }
 
     async fn relay_loop(&self, relay: PeerId, folder: String, every: Duration) {
+        let mut failures = 0u32;
         loop {
             if self.mode.get() != Mode::Hold {
-                let _ = self.relay_push(relay, &folder).await;
-                let _ = self.relay_pull(relay, &folder).await;
+                let ok = self.relay_push(relay, &folder).await.is_ok()
+                    & self.relay_pull(relay, &folder).await.is_ok();
+                failures = if ok { 0 } else { failures + 1 };
             }
-            let wait = match self.mode.get() {
-                Mode::Live => every,
-                Mode::Batched => every * 10,
-                Mode::Frugal | Mode::Hold => every * 30,
-            };
+            let wait = retry_wait(self.interval(every), failures);
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
                 _ = self.wake.notified() => {}
@@ -705,18 +703,25 @@ impl Inner {
         std::fs::rename(tmp, p)
     }
 
+    fn interval(&self, every: Duration) -> Duration {
+        match self.mode.get() {
+            Mode::Live => every,
+            Mode::Batched => every * 10,
+            Mode::Frugal | Mode::Hold => every * 30,
+        }
+    }
+
     async fn pull_loop(&self, peer: PeerId, folder: String, every: Duration) {
+        let mut failures = 0u32;
         loop {
-            if self.mode.get() != Mode::Hold
-                && let Err(e) = self.pull_once(peer, &folder).await
-            {
-                let _ = e; // peer offline: try again later
+            if self.mode.get() != Mode::Hold {
+                // An offline peer is normal; retry sooner at first, then settle.
+                failures = match self.pull_once(peer, &folder).await {
+                    Ok(()) => 0,
+                    Err(_) => failures + 1,
+                };
             }
-            let wait = match self.mode.get() {
-                Mode::Live => every,
-                Mode::Batched => every * 10,
-                Mode::Frugal | Mode::Hold => every * 30,
-            };
+            let wait = retry_wait(self.interval(every), failures);
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
                 _ = self.wake.notified() => {}
@@ -814,6 +819,16 @@ impl Inner {
             _ => None,
         }
     }
+}
+
+/// After `failures` failed rounds in a row: 2 s, 4 s, 8 s … capped at the
+/// normal interval, so a peer that just came up is found quickly and an
+/// absent one costs no more than usual.
+fn retry_wait(normal: Duration, failures: u32) -> Duration {
+    if failures == 0 {
+        return normal;
+    }
+    normal.min(Duration::from_secs(1 << failures.min(10)))
 }
 
 /// The transport's view of a node.
