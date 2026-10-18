@@ -16,8 +16,8 @@ use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 use vuoxi_core::RelPath;
 use vuoxi_rules::{Decision, Rules, Tag};
@@ -60,13 +60,63 @@ fn to_event(r: Resolved) -> Option<Event> {
     })
 }
 
+/// Where records go: one slot per folder and the engine's event queue.
+/// Swapped as a whole when the engine restarts with other folders.
+struct Target {
+    slots: Vec<Slot>,
+    events: UnboundedSender<(String, Event)>,
+}
+
+fn slots(folders: Vec<Watched>) -> io::Result<Vec<Slot>> {
+    folders
+        .into_iter()
+        .map(|f| {
+            let mut rules = Rules::new(&f.root, f.tag);
+            let map = HandleMap::build(&f.root, skipper(&mut rules))?;
+            Ok(Slot {
+                id: f.id,
+                rules,
+                map,
+            })
+        })
+        .collect()
+}
+
+/// The listening side; lives as long as the daemon, across engine restarts.
+pub struct Watch {
+    target: Arc<Mutex<Target>>,
+    connected: Arc<AtomicBool>,
+}
+
+impl Watch {
+    /// Point the watcher's records at a new set of folders and event queue
+    /// (after an engine restart). Every folder gets a reconcile, since events
+    /// in between went to the old queue.
+    pub fn retarget(
+        &self,
+        folders: Vec<Watched>,
+        events: UnboundedSender<(String, Event)>,
+    ) -> io::Result<()> {
+        let slots = slots(folders)?;
+        for s in &slots {
+            let _ = events.send((s.id.clone(), Event::Overflow));
+        }
+        *self.target.lock().unwrap() = Target { slots, events };
+        Ok(())
+    }
+
+    pub fn connected(&self) -> &Arc<AtomicBool> {
+        &self.connected
+    }
+}
+
 /// Listen on `socket` for the watcher, forever, on a thread of its own.
 pub fn spawn(
     socket: &Path,
     folders: Vec<Watched>,
     events: UnboundedSender<(String, Event)>,
     connected: Arc<AtomicBool>,
-) -> io::Result<std::thread::JoinHandle<()>> {
+) -> io::Result<Watch> {
     if let Some(dir) = socket.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -74,44 +124,39 @@ pub fn spawn(
     let listener = UnixListener::bind(socket)?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
 
-    let mut slots = Vec::new();
-    for f in folders {
-        let mut rules = Rules::new(&f.root, f.tag);
-        let map = HandleMap::build(&f.root, skipper(&mut rules))?;
-        slots.push(Slot {
-            id: f.id,
-            rules,
-            map,
-        });
-    }
-
-    Ok(std::thread::spawn(move || {
+    let target = Arc::new(Mutex::new(Target {
+        slots: slots(folders)?,
+        events,
+    }));
+    let (t, up) = (target.clone(), connected.clone());
+    std::thread::spawn(move || {
         for conn in listener.incoming() {
             let Ok(mut conn) = conn else { continue };
             let mut hello = [0u8; 4];
             if conn.read_exact(&mut hello).is_err() || hello != HELLO {
                 continue;
             }
-            connected.store(true, Ordering::Relaxed);
+            up.store(true, Ordering::Relaxed);
             eprintln!("vuoxi: watcher connected");
-            for s in &mut slots {
-                let _ = s.map.rebuild(skipper(&mut s.rules));
-                let _ = events.send((s.id.clone(), Event::Overflow));
+            {
+                let mut g = t.lock().unwrap();
+                let Target { slots, events } = &mut *g;
+                for s in slots.iter_mut() {
+                    let _ = s.map.rebuild(skipper(&mut s.rules));
+                    let _ = events.send((s.id.clone(), Event::Overflow));
+                }
             }
-            if pump(&mut conn, &mut slots, &events).is_err() {
+            if pump(&mut conn, &t).is_err() {
                 eprintln!("vuoxi: watcher stream ended badly");
             }
-            connected.store(false, Ordering::Relaxed);
+            up.store(false, Ordering::Relaxed);
             eprintln!("vuoxi: watcher gone; polling until it reconnects");
         }
-    }))
+    });
+    Ok(Watch { target, connected })
 }
 
-fn pump(
-    conn: &mut impl Read,
-    slots: &mut [Slot],
-    events: &UnboundedSender<(String, Event)>,
-) -> io::Result<()> {
+fn pump(conn: &mut impl Read, target: &Mutex<Target>) -> io::Result<()> {
     let mut buf = Vec::with_capacity(1 << 16);
     let mut chunk = vec![0u8; 1 << 16];
     let mut out = Vec::new();
@@ -121,6 +166,9 @@ fn pump(
             return Ok(());
         }
         buf.extend_from_slice(&chunk[..n]);
+        let mut g = target.lock().unwrap();
+        let Target { slots, events } = &mut *g;
+        let events = &*events;
         let mut at = 0;
         while let Some((rec, used)) = Record::decode(&buf[at..])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?

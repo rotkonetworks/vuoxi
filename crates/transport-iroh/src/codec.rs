@@ -19,6 +19,8 @@
 //! Fetch    = 12 folder_len:u8 folder:utf8 chunk_id:[u8;32]
 //! Sweep    = 13 folder_len:u8 folder:utf8 older_than_s:u64
 //! Reset    = 14 folder_len:u8 folder:utf8
+//! Invite   = 15 folder_len:u8 folder:utf8 tag_len:u8 tag:utf8 has_key:u8 [key:[u8;32]]
+//!               n:u32 peer:[u8;32]*n
 //! manifest = path:u64  rel_len:u32 rel:utf8  size:u64 mode:u32 mtime_ns:i64
 //!            deleted:u8  n_vv:u32 (peer:[u8;32] counter:u64)*n_vv
 //!            n_chunks:u32 (chunk_id:[u8;32])*n_chunks
@@ -132,6 +134,27 @@ pub fn encode_frame(msg: &Wire) -> Result<Vec<u8>, CodecError> {
         Wire::Reset { folder } => {
             body.push(14);
             put_folder(&mut body, folder)?;
+        }
+        Wire::Invite {
+            folder,
+            tag,
+            key,
+            members,
+        } => {
+            body.push(15);
+            put_folder(&mut body, folder)?;
+            put_folder(&mut body, tag)?;
+            match key {
+                Some(k) => {
+                    body.push(1);
+                    body.extend_from_slice(k);
+                }
+                None => body.push(0),
+            }
+            body.extend_from_slice(&(members.len() as u32).to_le_bytes());
+            for p in members {
+                body.extend_from_slice(&p.0);
+            }
         }
         Wire::Blobs { epoch, head, blobs } => {
             body.push(10);
@@ -247,6 +270,25 @@ fn decode_body(body: &[u8]) -> Result<Wire, CodecError> {
         14 => Wire::Reset {
             folder: r.folder()?,
         },
+        15 => {
+            let folder = r.folder()?;
+            let tag = r.folder()?;
+            let key = match r.u8()? {
+                0 => None,
+                1 => Some(r.array()?),
+                _ => return Err(CodecError::BadFlag),
+            };
+            let n = r.count(32)?;
+            let members = (0..n)
+                .map(|_| Ok(PeerId(r.array()?)))
+                .collect::<Result<_, CodecError>>()?;
+            Wire::Invite {
+                folder,
+                tag,
+                key,
+                members,
+            }
+        }
         t => return Err(CodecError::BadTag(t)),
     };
     if r.0.is_empty() {
@@ -457,6 +499,18 @@ mod tests {
         });
         roundtrip(Wire::Reset {
             folder: "ab12".into(),
+        });
+        roundtrip(Wire::Invite {
+            folder: "notes".into(),
+            tag: "code".into(),
+            key: Some([4; 32]),
+            members: vec![PeerId([1; 32]), PeerId([2; 32])],
+        });
+        roundtrip(Wire::Invite {
+            folder: "notes".into(),
+            tag: String::new(),
+            key: None,
+            members: vec![],
         });
         roundtrip(Wire::Missing(vec![]));
         roundtrip(Wire::Blobs {

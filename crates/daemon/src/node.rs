@@ -15,6 +15,7 @@
 
 use crate::folder::{Filter, Folder, Plan};
 use crate::fs::{self as vfs, Scan, Staged};
+use crate::offers::{Offer, Offers};
 use crate::seal::Seal;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -68,6 +69,8 @@ pub struct FolderSpec {
     pub filter: Box<dyn Filter>,
     /// Folder key; without one the folder is never sent to relays.
     pub key: Option<[u8; 32]>,
+    /// As configured (`code`, `secrets`, …), passed on when offering the folder.
+    pub tag: String,
 }
 
 pub struct PeerSpec {
@@ -98,6 +101,8 @@ pub struct NodeConfig {
     /// How long a relay keeps chunks no device still names: the history a
     /// relay holds beyond the current files.
     pub relay_keep: Duration,
+    /// Where folders offered by other devices are collected.
+    pub offers: Arc<Offers>,
 }
 
 struct Shared {
@@ -126,6 +131,9 @@ struct Inner {
     relay_keep: Duration,
     /// Chunks fetched ahead for a batch being applied, verified already.
     prefetched: Mutex<HashMap<ChunkId, Vec<u8>>>,
+    /// Per folder: tag and key, for offering it to devices that lack it.
+    invites: HashMap<String, (String, Option<[u8; 32]>)>,
+    offers: Arc<Offers>,
 }
 
 /// A running device. Dropping it stops serving; [`Node::shutdown`] also closes connections.
@@ -152,7 +160,9 @@ impl Node {
 
         let mut folders = HashMap::new();
         let mut seals = HashMap::new();
+        let mut invites = HashMap::new();
         for f in cfg.folders {
+            invites.insert(f.id.clone(), (f.tag.clone(), f.key));
             if let Some(k) = &f.key {
                 seals.insert(f.id.clone(), Seal::new(&f.id, k));
             }
@@ -195,6 +205,8 @@ impl Node {
             relay_wake: Notify::new(),
             relay_keep: cfg.relay_keep,
             prefetched: Mutex::new(HashMap::new()),
+            invites,
+            offers: cfg.offers,
             transport,
             mode,
             state_dir: cfg.state_dir,
@@ -217,6 +229,9 @@ impl Node {
                 }
             }
         }));
+
+        let (i, every) = (inner.clone(), cfg.pull_every);
+        tasks.push(tokio::spawn(async move { i.invite_loop(every).await }));
 
         for (peer, fs) in &inner.writers {
             for f in fs.iter().filter(|f| inner.folders.contains_key(*f)) {
@@ -316,6 +331,10 @@ impl Node {
             .keys()
             .map(|p| (*p, seen.get(p).map(|t| t.elapsed())))
             .collect()
+    }
+
+    pub fn offers(&self) -> &Arc<Offers> {
+        &self.inner.offers
     }
 
     pub fn is_relay(&self, p: &PeerId) -> bool {
@@ -1086,6 +1105,66 @@ impl Inner {
         }
     }
 
+    /// Offer our folders to the devices we share them with until each one
+    /// serves them back (it accepted). A device that does not have a folder
+    /// answers a `Pull` for it with nothing; that is the cue.
+    async fn invite_loop(&self, every: Duration) {
+        let mut joined: HashSet<(PeerId, String)> = HashSet::new();
+        loop {
+            for (peer, fs) in &self.peers {
+                if self.relays.contains(peer) {
+                    continue;
+                }
+                for f in fs.iter().filter(|f| self.folders.contains_key(*f)) {
+                    if joined.contains(&(*peer, f.clone())) {
+                        continue;
+                    }
+                    let probe = Wire::Pull {
+                        folder: f.clone(),
+                        epoch: 0,
+                        since: u64::MAX,
+                        limit: 0,
+                    };
+                    match self.transport.clone().call((*peer, probe)).await {
+                        Ok(Some(Wire::Batch { .. })) => {
+                            joined.insert((*peer, f.clone()));
+                        }
+                        Ok(_) => {
+                            let _ = self.invite(*peer, f).await;
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            tokio::time::sleep(self.interval(every)).await;
+        }
+    }
+
+    async fn invite(&self, peer: PeerId, folder: &str) -> io::Result<()> {
+        let Some((tag, key)) = self.invites.get(folder) else {
+            return Ok(());
+        };
+        let members = self
+            .peers
+            .iter()
+            .filter(|(p, fs)| **p != peer && fs.iter().any(|f| f == folder))
+            .map(|(p, _)| *p)
+            .chain([self.me])
+            .collect();
+        let w = Wire::Invite {
+            folder: folder.to_owned(),
+            tag: tag.clone(),
+            key: *key,
+            members,
+        };
+        self.transport
+            .clone()
+            .call((peer, w))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(())
+    }
+
     async fn handle(self: Arc<Self>, peer: PeerId, w: Wire) -> Option<Wire> {
         self.seen(peer);
         let writes = |f: &str| {
@@ -1126,6 +1205,21 @@ impl Inner {
                 let s = self.folders.get(&folder)?;
                 let limit = limit.min(PULL_LIMIT) as usize;
                 s.folder.lock().unwrap().pull(epoch, since, limit).ok()
+            }
+            Wire::Invite {
+                folder,
+                tag,
+                key,
+                members,
+            } if !self.relays.contains(&peer) && !self.folders.contains_key(&folder) => {
+                self.offers.record(Offer {
+                    folder,
+                    from: peer,
+                    tag,
+                    key,
+                    members,
+                });
+                Some(Wire::Ack(0))
             }
             _ => None,
         }

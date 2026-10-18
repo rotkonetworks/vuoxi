@@ -25,6 +25,14 @@ export interface Changes { head: number; next: number | null; items: Change[] }
 export interface TrashItem { stamp: number; rel: string; size: number }
 export interface Conflict { rel: string; of: string; size: number; mtime_ns: number }
 
+export interface TreeDir { name: string; files: number; bytes: number }
+export interface TreeFile { name: string; size: number; mtime_ns: number; mode: number }
+export interface Tree { dir: string; dirs: TreeDir[]; files: TreeFile[] }
+export const TAGS = ['code', 'secrets', 'photos', 'media', 'notes', 'archive']
+export interface Offer { folder: string; from: string; tag: string; members: string[]; path: string }
+export interface AddFolder { id: string; path: string; tag: string | null; peers: string[]; ro_peers: string[] }
+export interface Sharing { peers: string[]; ro_peers: string[]; tag?: string | null }
+
 export class ApiError extends Error {
   constructor(public status: number, msg: string) { super(msg) }
 }
@@ -68,6 +76,14 @@ export const api = {
   restore: (id: string, stamp: number, rel: string) =>
     req<{ ok: boolean }>(`${f(id)}/trash/restore`, { stamp, rel }),
   conflicts: (id: string) => req<{ items: Conflict[] }>(`${f(id)}/conflicts`),
+  tree: (id: string, dir: string) => req<Tree>(`${f(id)}/tree?dir=${encodeURIComponent(dir)}`),
+  addFolder: (b: AddFolder) => req<{ ok: boolean }>('api/folders', b),
+  setSharing: (id: string, b: Sharing) => req<{ ok: boolean }>(`${f(id)}/sharing`, b),
+  removeFolder: (id: string) => req<{ ok: boolean }>(`${f(id)}/remove`, {}),
+  offers: () => req<{ items: Offer[] }>('api/offers'),
+  acceptOffer: (o: { folder: string; from: string; path: string }) => req<{ ok: boolean }>('api/offers/accept', o),
+  dismissOffer: (o: { folder: string; from: string }) => req<{ ok: boolean }>('api/offers/dismiss', o),
+  browse: (path: string) => req<{ dirs: string[] }>(`api/browse?path=${encodeURIComponent(path)}`),
   setMode: (mode: Mode) => req<{ mode: Mode }>('api/mode', { mode }),
   sync: () => req<{ ok: boolean }>('api/sync', {}),
 }

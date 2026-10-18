@@ -42,3 +42,12 @@ tr.click { cursor: pointer; }
 .muted { color: #666; }
 .statusbar { position: fixed; left: 0; right: 0; bottom: 0; background: #ddd; border-top: 1px solid #000; padding: 5px 12px; font-size: 12px; display: flex; gap: 20px; flex-wrap: wrap; }
 @media (max-width: 700px) { .layout { flex-direction: column; } .side { width: 100%; } }
+.small { font-size: 11px; }
+.offer { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.offer input[type=text], .form input.w { width: 260px; max-width: 100%; }
+.form { background: #f3f3f3; border: 1px solid #ccc; padding: 6px 8px; margin: 0 0 6px; }
+.form table { width: auto; }
+.form .row { margin: 4px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.form .row > b { width: 40px; }
+.crumbs a { color: #000066; cursor: pointer; text-decoration: underline; }
+td.dir { cursor: pointer; color: #000066; font-weight: bold; }

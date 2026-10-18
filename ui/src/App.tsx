@@ -1,7 +1,8 @@
 import {
   For, Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
 } from 'solid-js'
-import { api, ApiError, MODES, type Mode, type Peer, type Status, type Transfer } from './api'
+import { api, ApiError, MODES, type Mode, type Offer, type Peer, type Status, type Transfer } from './api'
+import { FolderForm, OfferStrip } from './manage'
 import { ago, bytes, date, dateNs, dateS, shortId } from './fmt'
 
 type Tab = 'transfers' | 'files' | 'changes' | 'trash' | 'conflicts'
@@ -21,13 +22,28 @@ export default function App() {
   const [err, setErr] = createSignal('')
   const [tab, setTab] = createSignal<Tab>('transfers')
   const [folder, setFolder] = createSignal<string>('') // '' = all
+  const [offers, setOffers] = createSignal<Offer[]>([])
+  const [panel, setPanel] = createSignal<'' | 'add' | 'edit'>('')
+  const [confirm, setConfirm] = createSignal(false)
+  const [applying, setApplying] = createSignal(false)
+  let mutAt = 0 // the engine restarts after a mutation; the API is down for a few seconds
+  const recent = () => Date.now() - mutAt < 10000
+  const onErr = (e: unknown) => { if (!recent()) setErr(errText(e)) }
 
   async function poll() {
     try {
       const [s, t] = await Promise.all([api.status(), api.transfers()])
       setStatus(s); setTransfers(t.items); setErr('')
-    } catch (e) { setErr(errText(e)) }
+      if (Date.now() - mutAt > 3000) setApplying(false)
+      api.offers().then(o => setOffers(o.items), () => {})
+    } catch (e) {
+      if (recent()) setApplying(true); else { setApplying(false); setErr(errText(e)) }
+    }
   }
+  const mutate = async (f: () => Promise<unknown>) => {
+    await f(); mutAt = Date.now(); setApplying(true); setErr(''); poll()
+  }
+  const pick = (id: string) => { setFolder(id); setPanel(''); setConfirm(false) }
   onMount(() => {
     poll()
     const iv = setInterval(() => { if (document.visibilityState === 'visible') poll() }, 2000)
@@ -46,6 +62,7 @@ export default function App() {
     const fs = status()?.folders ?? []
     return { files: fs.reduce((a, f) => a + f.files, 0), bytes: fs.reduce((a, f) => a + f.bytes, 0) }
   })
+  const cur = () => status()?.folders.find(f => f.id === folder())
   const active = () => transfers().filter(t => t.state === 'active').length
 
   return (
@@ -64,7 +81,13 @@ export default function App() {
         <span>watcher: <b>{status() ? (status()!.device.watcher ? 'on' : 'off') : '?'}</b></span>
       </h1>
       <h2>Own devices sync</h2>
-      <Show when={err()}><div class="status err">{err()}</div></Show>
+      <Show when={applying()}><div class="status warn">applying… (restarting sync engine)</div></Show>
+      <Show when={err() && !applying()}><div class="status err">{err()}</div></Show>
+      <For each={offers()}>{o =>
+        <OfferStrip o={o}
+          accept={async path => { await mutate(() => api.acceptOffer({ folder: o.folder, from: o.from, path })); setOffers(offers().filter(x => x !== o)) }}
+          dismiss={async () => { await api.dismissOffer({ folder: o.folder, from: o.from }); setOffers(offers().filter(x => x !== o)) }} />}
+      </For>
 
       <div class="layout">
         <div class="side">
@@ -72,17 +95,18 @@ export default function App() {
           <table>
             <thead><tr><th>id</th><th class="r">files</th><th class="r">size</th></tr></thead>
             <tbody>
-              <tr class="click" classList={{ sel: folder() === '' }} onClick={() => setFolder('')}>
+              <tr class="click" classList={{ sel: folder() === '' }} onClick={() => pick('')}>
                 <td>(all)</td><td class="r">{total().files}</td><td class="r">{bytes(total().bytes)}</td>
               </tr>
               <For each={status()?.folders}>{f =>
-                <tr class="click" classList={{ sel: folder() === f.id }} onClick={() => setFolder(f.id)}>
-                  <td>{f.id} <span class="tag">{f.tag}</span></td>
+                <tr class="click" classList={{ sel: folder() === f.id }} onClick={() => pick(f.id)}>
+                  <td>{f.id} <span class="tag">{f.tag}</span><br /><span class="muted small" title={f.root}>{f.root}</span></td>
                   <td class="r">{f.files}</td><td class="r">{bytes(f.bytes)}</td>
                 </tr>}
               </For>
             </tbody>
           </table>
+          <button onClick={() => { setPanel(panel() === 'add' ? '' : 'add'); setConfirm(false) }}>+ Add folder</button>
           <h2>Peers</h2>
           <table>
             <thead><tr><th>name</th><th>last seen</th></tr></thead>
@@ -98,6 +122,27 @@ export default function App() {
         </div>
 
         <div class="main">
+          <Show when={panel() === 'add'}>
+            <FolderForm peers={status()?.peers ?? []} onDone={() => setPanel('')}
+              submit={(id, path, tag, peers, ro_peers) => mutate(() => api.addFolder({ id, path, tag, peers, ro_peers }))} />
+          </Show>
+          <Show when={folder() && cur()}>
+            <div class="bar">
+              <span>folder <b>{folder()}</b></span>
+              <button onClick={() => { setPanel(panel() === 'edit' ? '' : 'edit'); setConfirm(false) }}>Edit sharing</button>
+              <Show when={!confirm()} fallback={<>
+                <span>Really stop syncing? files stay on disk</span>
+                <button onClick={async () => { try { await mutate(() => api.removeFolder(folder())); pick('') } catch (e) { setErr(errText(e)); setConfirm(false) } }}>Yes</button>
+                <button onClick={() => setConfirm(false)}>Cancel</button>
+              </>}>
+                <button onClick={() => { setConfirm(true); setPanel('') }}>Remove</button>
+              </Show>
+            </div>
+            <Show when={panel() === 'edit'}>
+              <FolderForm edit={cur()} peers={status()?.peers ?? []} onDone={() => setPanel('')}
+                submit={(id, _p, tag, peers, ro_peers) => mutate(() => api.setSharing(id, tag === cur()!.tag ? { peers, ro_peers } : { peers, ro_peers, tag }))} />
+            </Show>
+          </Show>
           <div class="tabs">
             <For each={TABS}>{([t, label]) =>
               <a classList={{ on: tab() === t }} onClick={() => setTab(t)}>{label}</a>}
@@ -109,10 +154,10 @@ export default function App() {
             <Show when={tab() !== 'transfers'}>
               <Show when={!folder()}><div class="status warn">Showing folder <b>{fid()}</b>; select one on the left.</div></Show>
             </Show>
-            <Show when={tab() === 'files'}><Files id={fid()} onErr={e => setErr(errText(e))} /></Show>
-            <Show when={tab() === 'changes'}><Changes id={fid()} onErr={e => setErr(errText(e))} /></Show>
-            <Show when={tab() === 'trash'}><Trash id={fid()} onErr={e => setErr(errText(e))} /></Show>
-            <Show when={tab() === 'conflicts'}><Conflicts id={fid()} onErr={e => setErr(errText(e))} /></Show>
+            <Show when={tab() === 'files'}><Files id={fid()} head={status()?.folders.find(f => f.id === fid())?.head} onErr={onErr} /></Show>
+            <Show when={tab() === 'changes'}><Changes id={fid()} onErr={onErr} /></Show>
+            <Show when={tab() === 'trash'}><Trash id={fid()} onErr={onErr} /></Show>
+            <Show when={tab() === 'conflicts'}><Conflicts id={fid()} onErr={onErr} /></Show>
           </Show>
         </div>
       </div>
@@ -158,9 +203,10 @@ function Transfers(props: { items: Transfer[]; folder: string }) {
 
 interface TabProps { id: string; onErr: (e: unknown) => void }
 
-function Files(props: TabProps) {
+function Files(props: TabProps & { head?: number }) {
   const [q, setQ] = createSignal('')
   const [sq, setSq] = createSignal('')
+  const [dir, setDir] = createSignal('')
   const [sort, setSort] = createSignal<'rel' | 'size' | 'mtime'>('rel')
   const [desc, setDesc] = createSignal(false)
   const [del, setDel] = createSignal(false)
@@ -169,34 +215,60 @@ function Files(props: TabProps) {
   let tm: number | undefined
   onCleanup(() => clearTimeout(tm))
   const onQ = (v: string) => { setQ(v); clearTimeout(tm); tm = window.setTimeout(() => { setSq(v); setPage(0) }, 250) }
-  createEffect(on(() => props.id, () => setPage(0), { defer: true }))
+  createEffect(on(() => props.id, () => { setPage(0); setDir('') }, { defer: true }))
   const [data] = createResource(
-    () => ({ id: props.id, q: sq(), sort: sort(), desc: desc(), deleted: del(), offset: page() * LIM }),
+    () => sq() ? { id: props.id, q: sq(), sort: sort(), desc: desc(), deleted: del(), offset: page() * LIM } : undefined,
     async k => { try { return await api.files(k.id, { ...k, limit: LIM }) } catch (e) { props.onErr(e); return undefined } },
+  )
+  const [tree] = createResource(
+    () => sq() ? undefined : { id: props.id, dir: dir(), head: props.head },
+    async k => { try { return await api.tree(k.id, k.dir) } catch (e) { props.onErr(e); return undefined } },
   )
   const hd = (k: 'rel' | 'size' | 'mtime', label: string, r = false) =>
     <th class={'s' + (r ? ' r' : '')} onClick={() => { if (sort() === k) setDesc(!desc()); else { setSort(k); setDesc(false) } setPage(0) }}>
       {label}{sort() === k ? (desc() ? ' ▼' : ' ▲') : ''}
     </th>
   const total = () => data.latest?.total ?? 0
+  const parts = () => dir() ? dir().split('/') : []
+  const sub = (n: string) => dir() ? dir() + '/' + n : n
   return (
     <>
       <div class="bar">
         <input type="text" placeholder="search" value={q()} onInput={e => onQ(e.currentTarget.value)} />
-        <label><input type="checkbox" checked={del()} onChange={e => { setDel(e.currentTarget.checked); setPage(0) }} /> show deleted</label>
-        <span class="sp" style="flex:1" />
-        <span>{total() ? `${page() * LIM + 1}-${Math.min(total(), (page() + 1) * LIM)} of ${total()}` : '0 files'}</span>
-        <button disabled={page() === 0} onClick={() => setPage(page() - 1)}>prev</button>
-        <button disabled={(page() + 1) * LIM >= total()} onClick={() => setPage(page() + 1)}>next</button>
+        <Show when={sq()} fallback={<span class="crumbs">
+          <a onClick={() => setDir('')}>{props.id}</a>
+          <For each={parts()}>{(p, i) => <> › <a onClick={() => setDir(parts().slice(0, i() + 1).join('/'))}>{p}</a></>}</For>
+        </span>}>
+          <label><input type="checkbox" checked={del()} onChange={e => { setDel(e.currentTarget.checked); setPage(0) }} /> show deleted</label>
+          <span class="sp" style="flex:1" />
+          <span>{total() ? `${page() * LIM + 1}-${Math.min(total(), (page() + 1) * LIM)} of ${total()}` : '0 files'}</span>
+          <button disabled={page() === 0} onClick={() => setPage(page() - 1)}>prev</button>
+          <button disabled={(page() + 1) * LIM >= total()} onClick={() => setPage(page() + 1)}>next</button>
+        </Show>
       </div>
-      <table>
-        <thead><tr>{hd('rel', 'rel')}{hd('size', 'size', true)}{hd('mtime', 'modified')}</tr></thead>
-        <tbody>
-          <For each={data.latest?.items} fallback={<tr><td colspan="3" class="muted">{data.loading ? 'loading...' : 'no files'}</td></tr>}>{f =>
-            <tr><td class={'rel' + (f.deleted ? ' del' : '')}>{f.rel}</td><td class="r">{bytes(f.size)}</td><td>{dateNs(f.mtime_ns)}</td></tr>}
-          </For>
-        </tbody>
-      </table>
+      <Show when={sq()} fallback={
+        <table>
+          <thead><tr><th>name</th><th class="r">files</th><th class="r">size</th><th>modified</th></tr></thead>
+          <tbody>
+            <For each={tree.latest?.dirs}>{d =>
+              <tr><td class="dir" onClick={() => setDir(sub(d.name))}>{d.name}/</td><td class="r">{d.files}</td><td class="r">{bytes(d.bytes)}</td><td /></tr>}
+            </For>
+            <For each={tree.latest?.files}>{f =>
+              <tr><td class="rel">{f.name}</td><td /><td class="r">{bytes(f.size)}</td><td>{dateNs(f.mtime_ns)}</td></tr>}
+            </For>
+            <Show when={tree.latest && !tree.latest.dirs.length && !tree.latest.files.length}><tr><td colspan="4" class="muted">empty</td></tr></Show>
+            <Show when={!tree.latest}><tr><td colspan="4" class="muted">loading...</td></tr></Show>
+          </tbody>
+        </table>}>
+        <table>
+          <thead><tr>{hd('rel', 'rel')}{hd('size', 'size', true)}{hd('mtime', 'modified')}</tr></thead>
+          <tbody>
+            <For each={data.latest?.items} fallback={<tr><td colspan="3" class="muted">{data.loading ? 'loading...' : 'no files'}</td></tr>}>{f =>
+              <tr><td class={'rel' + (f.deleted ? ' del' : '')}>{f.rel}</td><td class="r">{bytes(f.size)}</td><td>{dateNs(f.mtime_ns)}</td></tr>}
+            </For>
+          </tbody>
+        </table>
+      </Show>
     </>
   )
 }

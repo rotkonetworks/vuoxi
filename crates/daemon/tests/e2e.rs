@@ -4,11 +4,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tower_service::Service;
 use vuoxi_core::{PeerId, RelPath, Wire};
 use vuoxi_daemon::{
-    BasicFilter, Event, FolderSpec, Node, NodeConfig, PeerSpec, RelayHandler, RelayStore,
+    BasicFilter, Event, FolderSpec, Node, NodeConfig, Offers, PeerSpec, RelayHandler, RelayStore,
 };
 use vuoxi_layers::Mode;
 use vuoxi_transport_iroh::{Allowlist, Config as TransportConfig, IrohTransport};
@@ -73,6 +74,7 @@ async fn start_ro(me: &Dev, other: &Dev, other_read_only: bool) -> Node {
             root: me.root.clone(),
             filter: Box::new(BasicFilter),
             key: None,
+            tag: String::new(),
         }],
         peers: vec![PeerSpec {
             id: id_of(&other.secret),
@@ -89,6 +91,7 @@ async fn start_ro(me: &Dev, other: &Dev, other_read_only: bool) -> Node {
         power_root: None,
         trash_keep: Duration::from_secs(86400),
         relay_keep: Duration::from_secs(86400),
+        offers: Default::default(),
     })
     .await
     .unwrap()
@@ -391,6 +394,7 @@ async fn start_via_relay_keep(me: &Dev, r: &Dev, key: [u8; 32], relay_keep: Dura
             root: me.root.clone(),
             filter: Box::new(BasicFilter),
             key: Some(key),
+            tag: String::new(),
         }],
         peers: vec![PeerSpec {
             id: id_of(&r.secret),
@@ -403,6 +407,7 @@ async fn start_via_relay_keep(me: &Dev, r: &Dev, key: [u8; 32], relay_keep: Dura
         power_root: None,
         trash_keep: Duration::from_secs(86400),
         relay_keep,
+        offers: Default::default(),
     })
     .await
     .unwrap()
@@ -575,4 +580,86 @@ async fn relay_forgets_old_versions_but_not_current_files() {
     .await;
     na.shutdown().await;
     nc.shutdown().await;
+}
+
+/// `me` with the given folders (each shared with `other`) and its offers sink.
+async fn start_with(
+    me: &Dev,
+    other: &Dev,
+    folders: Vec<(String, Option<[u8; 32]>)>,
+    offers: Arc<Offers>,
+) -> Node {
+    Node::start(NodeConfig {
+        secret: me.secret,
+        bind: vec![format!("127.0.0.1:{}", me.port).parse().unwrap()],
+        state_dir: me.state.clone(),
+        folders: folders
+            .iter()
+            .map(|(id, key)| FolderSpec {
+                id: id.clone(),
+                root: me.root.clone(),
+                filter: Box::new(BasicFilter),
+                key: *key,
+                tag: "code".into(),
+            })
+            .collect(),
+        peers: vec![PeerSpec {
+            id: id_of(&other.secret),
+            addrs: vec![format!("127.0.0.1:{}", other.port).parse().unwrap()],
+            folders: folders.iter().map(|(id, _)| id.clone()).collect(),
+            read_only: vec![],
+            relay: false,
+        }],
+        pull_every: Duration::from_millis(300),
+        power_root: None,
+        trash_keep: Duration::from_secs(86400),
+        relay_keep: Duration::from_secs(86400),
+        offers,
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_is_offered_a_folder_and_accepts() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e/offer");
+    let _ = fs::remove_dir_all(&base);
+    let a = dev(&base, "a", 11);
+    let b = dev(&base, "b", 12);
+    fs::create_dir_all(&a.root).unwrap();
+    fs::write(a.root.join("hello.txt"), b"offered").unwrap();
+    let key = [9u8; 32];
+
+    let na = start_with(&a, &b, vec![(FOLDER.into(), Some(key))], Default::default()).await;
+    let offers = Arc::new(Offers::default());
+    let nb = start_with(&b, &a, vec![], offers.clone()).await;
+    eventually("B is offered the folder", || !offers.list().is_empty()).await;
+    let o = offers.list().remove(0);
+    assert_eq!(o.folder, FOLDER);
+    assert_eq!(o.from, id_of(&a.secret));
+    assert_eq!(o.key, Some(key), "the relay key travels with the offer");
+    assert_eq!(o.tag, "code");
+    assert!(o.members.contains(&id_of(&a.secret)));
+
+    // Accepting = restarting with the folder, as the dashboard does.
+    nb.shutdown().await;
+    drop(nb);
+    let nb = start_with(&b, &a, vec![(o.folder.clone(), o.key)], offers.clone()).await;
+    eventually("B syncs the accepted folder", || {
+        fs::read(b.root.join("hello.txt")).ok().as_deref() == Some(b"offered")
+    })
+    .await;
+
+    // A dismissed offer stays hidden.
+    offers.dismiss("other", id_of(&a.secret));
+    offers.record(vuoxi_daemon::Offer {
+        folder: "other".into(),
+        from: id_of(&a.secret),
+        tag: String::new(),
+        key: None,
+        members: vec![],
+    });
+    assert!(offers.list().iter().all(|o| o.folder != "other"));
+    na.shutdown().await;
+    nb.shutdown().await;
 }

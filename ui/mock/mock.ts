@@ -18,7 +18,7 @@ let done = 2_621_440
 const t0 = Date.now()
 const exts = ['pdf', 'txt', 'md', 'jpg', 'rs']
 const allFiles = Array.from({ length: 357 }, (_, i) => ({
-  rel: `dir${i % 7}/file-${String(i).padStart(4, '0')}.${exts[i % 5]}`,
+  rel: `${i % 13 === 0 ? '' : `dir${i % 7}/`}${i % 13 !== 0 && i % 2 ? `sub${i % 3}/` : ''}file-${String(i).padStart(4, '0')}.${exts[i % 5]}`,
   size: ((i * 7919) % 5_000_000) + 100,
   mtime_ns: (NOW - i * 3_600_000) * 1e6,
   mode: 420, deleted: i % 29 === 0, version: { [dev]: 3, '6zvp…quqa': 1 },
@@ -31,6 +31,37 @@ let trash = [
   { stamp: Math.floor(NOW / 1000) - 86400, rel: 'a/b.pdf', size: 1234 },
   { stamp: Math.floor(NOW / 1000) - 7200, rel: 'old/report.txt', size: 99000 },
 ]
+
+const HOME = '/home/me'
+const expand = (p: string) => p.replace(/^~(?=\/|$)/, HOME)
+const homeDirs = ['notes', 'notebooks', 'photos', 'projects', 'docs', '.config']
+let offers = [{ folder: 'docs', from: 'laptop', tag: 'notes', members: ['laptop', 'phone'], path: HOME + '/docs' }]
+let downUntil = 0 // simulated engine restart after a mutation
+class HttpErr { constructor(public status: number, public error: string) {} }
+const restart = () => { downUntil = Date.now() + 4000; return { ok: true } }
+function addFolder(id: string, path: string, tag: string | null, peers: string[], ro: string[]) {
+  if (!/^[a-z0-9-]{1,64}$/.test(id)) throw new HttpErr(400, 'invalid folder id')
+  if (status.folders.some(f => f.id === id)) throw new HttpErr(409, `folder ${id} already exists`)
+  if (ro.some(p => !peers.includes(p))) throw new HttpErr(400, 'ro_peers must be a subset of peers')
+  status.folders.push({ id, root: expand(path).replace(/\/$/, ''), tag: tag ?? 'code', files: 0, bytes: 0, deleted: 0, head: 0, epoch: 'ffff', root_hash: '0000', peers, read_only_peers: ro, trash_bytes: 0, conflicts: 0 })
+}
+
+function tree(dir: string) {
+  const pre = dir ? dir + '/' : ''
+  const dirs = new Map<string, { name: string; files: number; bytes: number }>()
+  const files: { name: string; size: number; mtime_ns: number; mode: number }[] = []
+  for (const f of allFiles) {
+    if (f.deleted || !f.rel.startsWith(pre)) continue
+    const rest = f.rel.slice(pre.length), i = rest.indexOf('/')
+    if (i < 0) files.push({ name: rest, size: f.size, mtime_ns: f.mtime_ns, mode: f.mode })
+    else {
+      const d = dirs.get(rest.slice(0, i)) ?? { name: rest.slice(0, i), files: 0, bytes: 0 }
+      d.files++; d.bytes += f.size; dirs.set(d.name, d)
+    }
+  }
+  const by = (a: { name: string }, b: { name: string }) => (a.name < b.name ? -1 : 1)
+  return { dir, dirs: [...dirs.values()].sort(by), files: files.sort(by) }
+}
 
 function transfers() {
   done = Math.min(SIZE, done + 180_000)
@@ -50,9 +81,35 @@ function route(method: string, url: URL, body: any): unknown {
   if (p === 'transfers') return transfers()
   if (p === 'mode' && method === 'POST') { status.device.mode = body.mode; return { mode: body.mode } }
   if (p === 'sync') return { ok: true }
+  if (p === 'offers') return { items: offers }
+  if (p === 'offers/dismiss') { offers = offers.filter(o => !(o.folder === body.folder && o.from === body.from)); return { ok: true } }
+  if (p === 'offers/accept') {
+    const o = offers.find(o => o.folder === body.folder && o.from === body.from)
+    if (!o) throw new HttpErr(404, 'no such offer')
+    if (!body.path) throw new HttpErr(400, 'path required')
+    addFolder(o.folder, body.path, o.tag, [o.from, ...o.members.filter(m => m !== o.from)], [])
+    offers = offers.filter(x => x !== o)
+    return restart()
+  }
+  if (p === 'browse') {
+    const x = expand(q.get('path') ?? ''), hidden = /\/\.[^/]*$/.test(x)
+    const base = x.endsWith('/') ? x : x.slice(0, x.lastIndexOf('/') + 1), pre = x.slice(base.length)
+    if (base !== HOME + '/') return { dirs: [] }
+    return { dirs: homeDirs.filter(d => d.startsWith(pre) && (hidden || !d.startsWith('.'))).map(d => base + d) }
+  }
+  if (p === 'folders' && method === 'POST') { addFolder(body.id, body.path, body.tag, body.peers, body.ro_peers); return restart() }
   const m = p.match(/^folders\/([^/]+)\/(.*)$/)
   if (m) {
     const sub = m[2]
+    const fo = status.folders.find(f => f.id === m[1])
+    if (!fo) throw new HttpErr(404, 'no such folder')
+    if (sub === 'tree') return tree(q.get('dir') ?? '')
+    if (sub === 'sharing') {
+      if ((body.ro_peers as string[]).some(p => !body.peers.includes(p))) throw new HttpErr(400, 'ro_peers must be a subset of peers')
+      fo.peers = body.peers; fo.read_only_peers = body.ro_peers; if (body.tag) fo.tag = body.tag
+      return restart()
+    }
+    if (sub === 'remove') { status.folders = status.folders.filter(f => f !== fo); return restart() }
     if (sub === 'files') {
       let l = allFiles.filter(f => (q.get('deleted') === '1' || !f.deleted) && f.rel.toLowerCase().includes((q.get('q') ?? '').toLowerCase()))
       const s = q.get('sort') ?? 'rel'
@@ -81,8 +138,13 @@ export function install() {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.href)
     if (!url.pathname.includes('/api/')) return real(input, init)
     const body = init?.body ? JSON.parse(String(init.body)) : undefined
-    const out = route(init?.method ?? 'GET', url, body)
     await new Promise(r => setTimeout(r, 40))
+    if (Date.now() < downUntil) throw new TypeError('Failed to fetch')
+    let out: unknown
+    try { out = route(init?.method ?? 'GET', url, body) } catch (e) {
+      if (e instanceof HttpErr) return new Response(JSON.stringify({ error: e.error }), { status: e.status })
+      throw e
+    }
     return out === undefined
       ? new Response(JSON.stringify({ error: 'not found' }), { status: 404 })
       : new Response(JSON.stringify(out), { headers: { 'Content-Type': 'application/json' } })

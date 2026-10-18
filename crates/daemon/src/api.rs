@@ -34,6 +34,33 @@ pub struct FolderInfo {
     pub read_only_peers: Vec<String>,
 }
 
+/// A folder to add, as the dashboard describes it.
+pub struct NewFolder {
+    pub id: String,
+    pub path: PathBuf,
+    /// `None`: detect from the contents.
+    pub tag: Option<String>,
+    pub peers: Vec<String>,
+    pub ro_peers: Vec<String>,
+    /// `None`: generate one.
+    pub key: Option<[u8; 32]>,
+}
+
+/// Changes to the configuration. The daemon's owner implements it: it edits
+/// the config file and restarts the engine. Errors are shown to the user.
+pub trait Control: Send + Sync {
+    fn add_folder(&self, f: NewFolder) -> Result<(), String>;
+    /// `tag`: `None` leaves it, `Some(None)` detects it again.
+    fn set_sharing(
+        &self,
+        id: &str,
+        peers: Vec<String>,
+        ro_peers: Vec<String>,
+        tag: Option<Option<String>>,
+    ) -> Result<(), String>;
+    fn remove_folder(&self, id: &str) -> Result<(), String>;
+}
+
 pub struct ApiCtx {
     pub token: String,
     pub device_id: String,
@@ -42,6 +69,7 @@ pub struct ApiCtx {
     pub folders: HashMap<String, FolderInfo>,
     pub watcher: Arc<AtomicBool>,
     pub started: Instant,
+    pub control: Arc<dyn Control>,
 }
 
 /// The token in `state_dir/ui-token`, created (0600) on first use.
@@ -266,6 +294,7 @@ async fn conn(mut sock: TcpStream, node: &Node, ctx: &ApiCtx) -> io::Result<()> 
     }
 }
 
+type ApiErr = (&'static str, String);
 type ApiResult = Result<Value, (&'static str, String)>;
 
 fn not_found(what: impl std::fmt::Display) -> (&'static str, String) {
@@ -310,12 +339,58 @@ async fn route(r: &Req, node: &Node, ctx: &ApiCtx) -> ApiResult {
             node.sync_now();
             Ok(json!({"mode": mode_name(m)}))
         }
+        ("GET", ["api", "offers"]) => Ok(offers(node, ctx)),
+        ("POST", ["api", "offers", "accept"]) => accept(node, ctx, r),
+        ("POST", ["api", "offers", "dismiss"]) => {
+            let v: Value = serde_json::from_slice(&r.body).map_err(bad)?;
+            let (folder, from) = offer_key(&v, ctx)?;
+            node.offers().dismiss(&folder, from);
+            Ok(json!({"ok": true}))
+        }
+        ("GET", ["api", "browse"]) => Ok(browse(r.query.get("path").map_or("", String::as_str))),
+        ("POST", ["api", "folders"]) => {
+            let v: Value = serde_json::from_slice(&r.body).map_err(bad)?;
+            let id = v
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| bad("id"))?;
+            let path = v
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| bad("path"))?;
+            let (peers, ro_peers) = peer_lists(&v, ctx)?;
+            ctx.control
+                .add_folder(NewFolder {
+                    id: id.to_owned(),
+                    path: expand(path),
+                    tag: v.get("tag").and_then(Value::as_str).map(str::to_owned),
+                    peers,
+                    ro_peers,
+                    key: None,
+                })
+                .map_err(bad)?;
+            Ok(json!({"ok": true}))
+        }
+        ("POST", ["api", "folders", id, "sharing"]) => {
+            let v: Value = serde_json::from_slice(&r.body).map_err(bad)?;
+            let (peers, ro_peers) = peer_lists(&v, ctx)?;
+            let tag = v.get("tag").map(|t| t.as_str().map(str::to_owned));
+            ctx.control
+                .set_sharing(id, peers, ro_peers, tag)
+                .map_err(bad)?;
+            Ok(json!({"ok": true}))
+        }
+        ("POST", ["api", "folders", id, "remove"]) => {
+            ctx.control.remove_folder(id).map_err(bad)?;
+            Ok(json!({"ok": true}))
+        }
         ("GET", ["api", "folders", id, what]) => {
             if !node.folder_ids().iter().any(|f| f == id) {
                 return Err(not_found(format!("no folder {id}")));
             }
             match *what {
                 "files" => files(node, id, r),
+                "tree" => tree(node, id, r),
                 "changes" => changes(node, id, r),
                 "trash" => trash(node, id),
                 "conflicts" => conflicts(node, id),
@@ -325,6 +400,194 @@ async fn route(r: &Req, node: &Node, ctx: &ApiCtx) -> ApiResult {
         ("POST", ["api", "folders", id, "trash", "restore"]) => restore(node, id, r).await,
         _ => Err(not_found(r.path.clone())),
     }
+}
+
+/// `~/x` → `$HOME/x`.
+fn expand(p: &str) -> PathBuf {
+    match p.strip_prefix("~/").or((p == "~").then_some("")) {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest),
+        None => PathBuf::from(p),
+    }
+}
+
+fn names(v: &Value, k: &str) -> Result<Vec<String>, (&'static str, String)> {
+    match v.get(k) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|x| x.as_str().map(str::to_owned).ok_or_else(|| bad(k)))
+            .collect(),
+        _ => Err(bad(format!("{k} must be a list of peer names"))),
+    }
+}
+
+/// `peers` and `ro_peers`, checked against the configured peers.
+fn peer_lists(
+    v: &Value,
+    ctx: &ApiCtx,
+) -> Result<(Vec<String>, Vec<String>), ApiErr> {
+    let (peers, ro) = (names(v, "peers")?, names(v, "ro_peers")?);
+    for n in peers.iter().chain(&ro) {
+        if !ctx.peers.values().any(|p| &p.name == n) {
+            return Err(bad(format!("no peer named {n}")));
+        }
+    }
+    if let Some(n) = ro.iter().find(|n| !peers.contains(n)) {
+        return Err(bad(format!("{n} is read-only but not sharing the folder")));
+    }
+    Ok((peers, ro))
+}
+
+fn peer_name(ctx: &ApiCtx, id: &PeerId) -> Option<String> {
+    ctx.peers.get(id).map(|p| p.name.clone())
+}
+
+fn offer_key(v: &Value, ctx: &ApiCtx) -> Result<(String, PeerId), (&'static str, String)> {
+    let folder = v
+        .get("folder")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("folder"))?;
+    let from = v
+        .get("from")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("from"))?;
+    let id = ctx
+        .peers
+        .iter()
+        .find(|(_, p)| p.name == from)
+        .map(|(id, _)| *id)
+        .ok_or_else(|| bad(format!("no peer named {from}")))?;
+    Ok((folder.to_owned(), id))
+}
+
+fn offers(node: &Node, ctx: &ApiCtx) -> Value {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let items: Vec<Value> = node
+        .offers()
+        .list()
+        .into_iter()
+        .filter_map(|o| {
+            let from = peer_name(ctx, &o.from)?;
+            let members: Vec<String> = o
+                .members
+                .iter()
+                .map(|m| peer_name(ctx, m).unwrap_or_else(|| format!("{}…", short(m))))
+                .collect();
+            Some(json!({
+                "folder": o.folder, "from": from, "tag": o.tag,
+                "members": members, "path": home.join(&o.folder),
+            }))
+        })
+        .collect();
+    json!({ "items": items })
+}
+
+fn short(p: &PeerId) -> String {
+    p.0[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Join an offered folder: shared with the offering device and every other
+/// member we know (a relay included), with the folder's key and tag.
+fn accept(node: &Node, ctx: &ApiCtx, r: &Req) -> ApiResult {
+    let v: Value = serde_json::from_slice(&r.body).map_err(bad)?;
+    let (folder, from) = offer_key(&v, ctx)?;
+    let o = node
+        .offers()
+        .get(&folder, from)
+        .ok_or_else(|| not_found("no such offer"))?;
+    let path = v
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("path"))?;
+    let mut peers: Vec<String> = Vec::new();
+    for id in std::iter::once(&o.from).chain(&o.members) {
+        if let Some(n) = peer_name(ctx, id).filter(|n| !peers.contains(n)) {
+            peers.push(n);
+        }
+    }
+    ctx.control
+        .add_folder(NewFolder {
+            id: o.folder.clone(),
+            path: expand(path),
+            tag: (!o.tag.is_empty()).then(|| o.tag.clone()),
+            peers,
+            ro_peers: Vec::new(),
+            key: o.key,
+        })
+        .map_err(bad)?;
+    node.offers().take(&o.folder);
+    Ok(json!({"ok": true}))
+}
+
+/// Directory completion for a path field.
+fn browse(input: &str) -> Value {
+    let p = expand(if input.is_empty() { "~" } else { input });
+    let (dir, prefix) = if p.is_dir() {
+        (p.clone(), String::new())
+    } else {
+        let prefix = p
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        (
+            p.parent().map(Path::to_path_buf).unwrap_or_default(),
+            prefix,
+        )
+    };
+    let mut dirs: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let hidden_ok = !name.starts_with('.') || prefix.starts_with('.');
+            (hidden_ok && name.starts_with(&prefix)).then(|| dir.join(name).display().to_string())
+        })
+        .collect();
+    dirs.sort();
+    dirs.truncate(50);
+    json!({ "dirs": dirs })
+}
+
+/// One directory level of the folder's live files.
+fn tree(node: &Node, id: &str, r: &Req) -> ApiResult {
+    let dir = r.query.get("dir").map_or("", |d| d.trim_matches('/'));
+    if !dir.is_empty() && RelPath::new(dir).is_err() {
+        return Err(bad("dir must be a relative path"));
+    }
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
+    node.with_folder(id, |f| {
+        let mut dirs: std::collections::BTreeMap<&str, (u64, u64)> = Default::default();
+        let mut files = Vec::new();
+        for m in f.live() {
+            let Some(rest) = m.rel.as_str().strip_prefix(&prefix) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                Some((d, _)) => {
+                    let e = dirs.entry(d).or_default();
+                    e.0 += 1;
+                    e.1 += m.meta.size;
+                }
+                None => files.push(m),
+            }
+        }
+        files.sort_by(|a, b| a.rel.cmp(&b.rel));
+        json!({
+            "dir": dir,
+            "dirs": dirs.into_iter().map(|(name, (n, b))| json!({"name": name, "files": n, "bytes": b})).collect::<Vec<_>>(),
+            "files": files.into_iter().map(|m| json!({
+                "name": m.rel.file_name(), "size": m.meta.size,
+                "mtime_ns": m.meta.mtime_ns, "mode": m.meta.mode,
+            })).collect::<Vec<_>>(),
+        })
+    })
+    .ok_or_else(|| not_found(id))
 }
 
 fn mode_name(m: Mode) -> &'static str {

@@ -108,3 +108,55 @@ Everything outside `/api/` is the dashboard, served from the directory in
 
 `GET /api/folders/{id}/changes` also takes `desc=1`: the newest `limit`
 entries, newest first. Transfers currently report downloads only.
+
+## GET /api/folders/{id}/tree?dir=a/b
+
+One directory of the folder's current files (no tombstones): subdirectories
+first with totals of everything under them, then files; both sorted by name.
+`dir` empty or absent = the folder root.
+
+```json
+{ "dir": "a/b",
+  "dirs":  [ { "name": "src", "files": 120, "bytes": 834221 } ],
+  "files": [ { "name": "README.md", "size": 1200, "mtime_ns": 1760000000000000000, "mode": 420 } ] }
+```
+
+## Managing folders
+
+These edit the config file and then restart the sync engine inside the daemon
+(a second or two; a metadata walk of every folder). The API is briefly
+unavailable during the restart: clients should retry. Each answers
+`200 {"ok": true}` before the restart.
+
+- `POST /api/folders` `{"id": "notes", "path": "~/notes", "tag": null | "code" | "secrets" | "photos" | "media" | "notes" | "archive", "peers": ["laptop", "relay"], "ro_peers": []}`.
+  `tag: null` detects it from the contents. `path` may start with `~/`; it is
+  created if missing. A relay key is generated. `peers` are peer names from
+  `/api/status`; `ro_peers` must be a subset of `peers`.
+- `POST /api/folders/{id}/sharing` `{"peers": [...], "ro_peers": [...], "tag": optional}`.
+- `POST /api/folders/{id}/remove` stops syncing it; the files stay on disk.
+
+## Folder offers (introducing)
+
+A device sharing a folder with a peer that does not have it yet offers it
+(with its relay key, over the encrypted device link) every pull interval. The
+peer lists the offer until it is accepted or dismissed.
+
+- `GET /api/offers` →
+  `{"items": [{"folder": "notes", "from": "laptop", "tag": "code", "members": ["laptop", "relay"], "path": "/home/me/notes"}]}`.
+  `members`: the folder's other members by our peer name where we know them
+  (relays included), else a short id. `path`: suggested location.
+- `POST /api/offers/accept` `{"folder": "notes", "from": "laptop", "path": "~/notes"}`:
+  adds the folder shared with the offering device and every member we know.
+- `POST /api/offers/dismiss` `{"folder": "notes", "from": "laptop"}`: hide it
+  until the daemon restarts.
+
+## GET /api/browse?path=~/no
+
+Directory completion for path fields: if `path` is a directory, its
+subdirectories; otherwise the subdirectories of its parent that start with its
+last component. Hidden directories only when the prefix starts with `.`.
+At most 50.
+
+```json
+{ "dirs": ["/home/me/notes", "/home/me/notebooks"] }
+```

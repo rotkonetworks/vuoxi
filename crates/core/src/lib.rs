@@ -186,6 +186,16 @@ pub enum Wire {
     Reset {
         folder: String,
     },
+    /// Device to device: "I share `folder` with you, and you do not have it
+    /// yet". Carries what the receiver needs to join: the folder's tag, its
+    /// relay key and its other members. Sent only over the encrypted link
+    /// between one person's devices, never to relays.
+    Invite {
+        folder: String,
+        tag: String,
+        key: Option<[u8; 32]>,
+        members: Vec<PeerId>,
+    },
 }
 
 /// Moves [`Wire`] messages to one peer; answers with the peer's reply, if any.
