@@ -1,0 +1,4 @@
+#!/bin/sh
+# Open the vuoxi dashboard as its own Chromium app window.
+link=$(vuoxi ui) || exit 1
+exec "${VUOXI_BROWSER:-chromium}" --app="$link" --class=vuoxi >/dev/null 2>&1

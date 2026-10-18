@@ -73,6 +73,9 @@ pub struct Folder {
     /// Chunk offsets of files we have read or written.
     offsets: HashMap<PathId, Vec<ChunkEntry>>,
     filter: Box<dyn Filter>,
+    /// Between [`Folder::batch`] and [`Folder::flush`]: versions recorded in
+    /// memory, not yet in the index and journal.
+    pending: Option<Vec<Manifest>>,
 }
 
 impl Folder {
@@ -93,6 +96,7 @@ impl Folder {
             chunk_refs: HashMap::new(),
             offsets: HashMap::new(),
             filter,
+            pending: None,
         };
         let mut seen = HashSet::new();
         for (_, p) in f.store.since(0, usize::MAX)? {
@@ -175,9 +179,34 @@ impl Folder {
         }
     }
 
+    /// Record versions in memory until [`Folder::flush`], so a large import
+    /// costs one index commit and one fsync per batch instead of per file.
+    /// Losing a batch to a crash is harmless: the disk still has the files
+    /// and the next reconcile records them again.
+    pub fn batch(&mut self) {
+        self.pending.get_or_insert_with(Vec::new);
+    }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        let Some(ms) = self.pending.take() else {
+            return Ok(());
+        };
+        let paths: Vec<PathId> = ms.iter().map(|m| m.path).collect();
+        self.store.index().put_batch(ms)?;
+        if !paths.is_empty() {
+            self.store.append_batch(&paths)?;
+        }
+        Ok(())
+    }
+
     fn record(&mut self, m: Manifest) -> io::Result<()> {
-        self.store.index().put(m.clone())?;
-        self.store.append(m.path)?;
+        match &mut self.pending {
+            Some(p) => p.push(m.clone()),
+            None => {
+                self.store.index().put(m.clone())?;
+                self.store.append(m.path)?;
+            }
+        }
         self.index_chunks(&m);
         self.catalog.insert(m.path, m);
         Ok(())

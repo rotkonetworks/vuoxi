@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=vuoxi
+Comment=File sync dashboard
+Exec=vuoxi-ui
+Icon=folder-sync
+Terminal=false
+Categories=Network;FileTransfer;
+StartupWMClass=vuoxi

@@ -33,6 +33,10 @@ use vuoxi_layers::{Mode, ModeHandle, PowerState};
 use vuoxi_transport_iroh::{Allowlist, Config as TransportConfig, IrohTransport, Serve};
 
 const PULL_LIMIT: u32 = 256;
+/// Files hashed at once while reconciling a folder.
+const SCAN_WINDOW: usize = 4;
+/// Versions per index commit and journal fsync while reconciling.
+const RECORD_BATCH: usize = 1024;
 /// Chunk ids per relay `Has`: 1 MiB of ids, well under a frame.
 const MARK_BATCH: usize = 32 * 1024;
 /// Reset a relay's log once it holds this many records per file.
@@ -357,17 +361,51 @@ impl Inner {
             files.retain(|r| !f.skip_file(r));
         }
         let mut changed = Vec::new();
-        for rel in files {
-            if let Some(m) = self.scan_commit(&s, &root, &rel).await? {
-                changed.push(m);
+        s.folder.lock().unwrap().batch();
+        let r = async {
+            use futures_util::stream::{self, StreamExt};
+            let mut scans = stream::iter(files)
+                .map(|rel| {
+                    let known = s.folder.lock().unwrap().known_meta(&rel);
+                    let root = root.clone();
+                    async move {
+                        let r = rel.clone();
+                        let scan = tokio::task::spawn_blocking(move || vfs::scan(&root, &r, known))
+                            .await
+                            .map_err(io::Error::other)?;
+                        Ok::<_, io::Error>((rel, scan))
+                    }
+                })
+                .buffered(SCAN_WINDOW);
+            let mut n = 0;
+            while let Some(x) = scans.next().await {
+                let (rel, scan) = x?;
+                let scan = match scan {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                    x => x?,
+                };
+                let mut f = s.folder.lock().unwrap();
+                if let Some(m) = f.commit_local(&rel, scan)? {
+                    changed.push(m);
+                    n += 1;
+                    if n % RECORD_BATCH == 0 {
+                        f.flush()?;
+                        f.batch();
+                    }
+                }
             }
-        }
-        let gone = s.folder.lock().unwrap().missing_under(under);
-        for rel in gone {
-            if let Some(m) = s.folder.lock().unwrap().commit_local(&rel, Scan::Missing)? {
-                changed.push(m);
+            let mut f = s.folder.lock().unwrap();
+            for rel in f.missing_under(under) {
+                if let Some(m) = f.commit_local(&rel, Scan::Missing)? {
+                    changed.push(m);
+                }
             }
+            Ok::<_, io::Error>(())
         }
+        .await;
+        let flushed = s.folder.lock().unwrap().flush();
+        r?;
+        flushed?;
         drop(_ops);
         self.offer(folder, changed);
         Ok(())
