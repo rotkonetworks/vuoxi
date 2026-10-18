@@ -1,7 +1,7 @@
 //! The rules crate as the daemon's [`Filter`].
 
 use crate::folder::Filter;
-use crate::fs::is_tmp;
+use crate::fs::{is_tmp, is_trash_dir};
 use std::path::Path;
 use vuoxi_core::RelPath;
 use vuoxi_rules::{Decision, Rules, Tag, VUOXI_FILE};
@@ -29,7 +29,7 @@ pub fn parse_tag(s: &str) -> Option<Tag> {
 
 impl Filter for RulesFilter {
     fn skip_dir(&mut self, _: &Path, rel: &RelPath) -> bool {
-        matches!(self.0.dir(rel), Decision::Skip(_))
+        is_trash_dir(rel) || matches!(self.0.dir(rel), Decision::Skip(_))
     }
 
     fn skip_file(&mut self, _: &Path, rel: &RelPath) -> bool {

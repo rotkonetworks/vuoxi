@@ -56,6 +56,7 @@ fn run() -> i32 {
         | Cmd::Pair { .. }
         | Cmd::FolderAdd { .. }
         | Cmd::FolderList
+        | Cmd::FolderKey(_)
         | Cmd::ConfigPath => return local::run(cmd, &o, want_json(&o)),
         Cmd::Status => ("status", None),
         Cmd::Changes => ("changes", page(&o)),

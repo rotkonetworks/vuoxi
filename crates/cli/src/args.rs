@@ -16,8 +16,9 @@ usage: vuoxi [--json] [--socket PATH] [--config PATH] [--fields a,b] <command>
   mcp-serve                         MCP over stdio (not implemented yet)
   init                              create device key and config; print the id
   id                                print this device's id
-  pair NAME ID ADDR...              add or replace a peer
-  folder add ID PATH [--tag T] [--peer NAME]...
+  pair NAME ID ADDR... [--relay]    add or replace a peer (--relay: it stores encrypted)
+  folder add ID PATH [--tag T] [--peer NAME]... [--ro-peer NAME]... [--key HEX]
+  folder key ID                     print a folder's relay key (give it to your other devices)
   folder list                       configured folders
   config path                       where the config file is
 output: one line per item; --json or VUOXI_FORMAT=json for JSON
@@ -47,6 +48,7 @@ pub enum Cmd {
         path: PathBuf,
     },
     FolderList,
+    FolderKey(String),
     ConfigPath,
     Help(Option<&'static str>),
 }
@@ -62,6 +64,9 @@ pub struct Opts {
     pub config: Option<PathBuf>,
     pub tag: Option<String>,
     pub peers: Vec<String>,
+    pub read_only_peers: Vec<String>,
+    pub key: Option<String>,
+    pub relay: bool,
 }
 
 pub fn command_help(cmd: &str) -> Option<&'static str> {
@@ -127,6 +132,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
             "--config" => o.config = Some(value().ok_or("--config needs a path")?.into()),
             "--tag" => o.tag = Some(value().ok_or("--tag needs a value")?),
             "--peer" => o.peers.push(value().ok_or("--peer needs a name")?),
+            "--ro-peer" => o
+                .read_only_peers
+                .push(value().ok_or("--ro-peer needs a peer name")?),
+            "--key" => o.key = Some(value().ok_or("--key needs 64 hex characters")?),
+            "--relay" => o.relay = true,
             "--socket" => o.socket = Some(value().ok_or("--socket needs a path")?.into()),
             "--since" => o.since = Some(num("--since", value())?),
             "--limit" => o.limit = Some(num("--limit", value())?),
@@ -166,8 +176,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
         return Err("--read-only applies to daemon only".into());
     }
     let folder_add = name == "folder" && rest.first().is_some_and(|s| s == "add");
-    if (o.tag.is_some() || !o.peers.is_empty()) && !folder_add {
-        return Err("--tag/--peer apply to `folder add` only".into());
+    if (o.tag.is_some() || !o.peers.is_empty() || !o.read_only_peers.is_empty() || o.key.is_some())
+        && !folder_add
+    {
+        return Err("--tag/--peer/--ro-peer/--key apply to `folder add` only".into());
+    }
+    if o.relay && name != "pair" {
+        return Err("--relay applies to `pair` only".into());
     }
     let local = matches!(
         name.as_str(),
@@ -252,7 +267,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<(Cmd, Opts), Str
                 arity(1, 1, "list")?;
                 Cmd::FolderList
             }
-            _ => return Err("folder: expected `add ID PATH` or `list`".into()),
+            Some("key") => {
+                arity(2, 2, "key ID")?;
+                Cmd::FolderKey(rest[1].clone())
+            }
+            _ => return Err("folder: expected `add ID PATH`, `list` or `key ID`".into()),
         },
         "config" => match rest.first().map(String::as_str) {
             Some("path") => {

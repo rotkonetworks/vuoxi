@@ -198,6 +198,12 @@ pub struct FolderConfig {
     pub tag: Option<String>,
     /// Names of peers this folder is shared with.
     pub peers: Vec<String>,
+    /// Of `peers`, those whose changes are not accepted here: they receive
+    /// this folder but cannot change it on this device.
+    pub read_only_peers: Vec<String>,
+    /// Folder key for relays: they store this folder encrypted under it.
+    /// Every device sharing the folder holds the same key; relays never do.
+    pub key: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,6 +211,8 @@ pub struct PeerConfig {
     pub name: String,
     pub id: PeerId,
     pub addrs: Vec<SocketAddr>,
+    /// A relay: stores and serves this device's folders encrypted, never reads them.
+    pub relay: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,7 +222,16 @@ pub struct Config {
     pub watcher_socket: Option<PathBuf>,
     pub folders: Vec<FolderConfig>,
     pub peers: Vec<PeerConfig>,
+    /// Days to keep files a peer replaced or deleted (`.vuoxi-trash`). 0 keeps none.
+    pub trash_days: u32,
+    /// Where the dashboard API listens. Loopback only by design.
+    pub ui_listen: SocketAddr,
+    /// Set on a relay: where it keeps the encrypted folders it serves.
+    pub relay_dir: Option<PathBuf>,
 }
+
+pub const DEFAULT_TRASH_DAYS: u32 = 30;
+pub const DEFAULT_UI_PORT: u16 = 41642;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -229,6 +246,12 @@ struct RawConfig {
     folders: Vec<RawFolder>,
     #[serde(default, rename = "peer", skip_serializing_if = "Vec::is_empty")]
     peers: Vec<RawPeer>,
+    #[serde(default = "default_trash_days")]
+    trash_days: u32,
+    #[serde(default = "default_ui_listen")]
+    ui_listen: SocketAddr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relay_dir: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -240,6 +263,11 @@ struct RawFolder {
     tag: Option<String>,
     #[serde(default)]
     peers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    read_only_peers: Vec<String>,
+    /// Hex; see [`FolderConfig::key`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -249,6 +277,8 @@ struct RawPeer {
     id: String,
     #[serde(default)]
     addrs: Vec<SocketAddr>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    relay: bool,
 }
 
 fn default_listen() -> Vec<SocketAddr> {
@@ -256,6 +286,31 @@ fn default_listen() -> Vec<SocketAddr> {
         std::net::Ipv6Addr::UNSPECIFIED,
         DEFAULT_PORT,
     ))]
+}
+
+fn default_trash_days() -> u32 {
+    DEFAULT_TRASH_DAYS
+}
+
+fn default_ui_listen() -> SocketAddr {
+    SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, DEFAULT_UI_PORT))
+}
+
+pub fn encode_key(k: &[u8; 32]) -> String {
+    k.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn decode_key(s: &str) -> Result<[u8; 32], Error> {
+    let s = s.trim();
+    if s.len() != 64 {
+        return invalid("folder key must be 64 hex characters");
+    }
+    let mut k = [0u8; 32];
+    for (i, b) in k.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16)
+            .map_err(|_| Error::Invalid("folder key must be hex".into()))?;
+    }
+    Ok(k)
 }
 
 fn env_dir(var: &str) -> Option<PathBuf> {
@@ -282,6 +337,9 @@ impl Default for Config {
             watcher_socket: None,
             folders: Vec::new(),
             peers: Vec::new(),
+            trash_days: DEFAULT_TRASH_DAYS,
+            ui_listen: default_ui_listen(),
+            relay_dir: None,
         }
     }
 }
@@ -347,6 +405,9 @@ impl Config {
             watcher_socket: raw.watcher_socket,
             folders: Vec::new(),
             peers: Vec::new(),
+            trash_days: raw.trash_days,
+            ui_listen: raw.ui_listen,
+            relay_dir: raw.relay_dir,
         };
         for p in raw.peers {
             let id =
@@ -355,14 +416,23 @@ impl Config {
                 name: p.name,
                 id,
                 addrs: p.addrs,
+                relay: p.relay,
             })?;
         }
         for f in raw.folders {
+            let key = f
+                .key
+                .as_deref()
+                .map(decode_key)
+                .transpose()
+                .map_err(|e| Error::Invalid(format!("folder {}: {e}", f.id)))?;
             c.add_folder(FolderConfig {
                 id: f.id,
                 path: f.path,
                 tag: f.tag,
                 peers: f.peers,
+                read_only_peers: f.read_only_peers,
+                key,
             })?;
         }
         Ok(c)
@@ -373,6 +443,9 @@ impl Config {
             listen: self.listen.clone(),
             state_dir: self.state_dir.clone(),
             watcher_socket: self.watcher_socket.clone(),
+            trash_days: self.trash_days,
+            ui_listen: self.ui_listen,
+            relay_dir: self.relay_dir.clone(),
             folders: self
                 .folders
                 .iter()
@@ -381,6 +454,8 @@ impl Config {
                     path: f.path.clone(),
                     tag: f.tag.clone(),
                     peers: f.peers.clone(),
+                    read_only_peers: f.read_only_peers.clone(),
+                    key: f.key.as_ref().map(encode_key),
                 })
                 .collect(),
             peers: self
@@ -390,6 +465,7 @@ impl Config {
                     name: p.name.clone(),
                     id: encode_id(&p.id),
                     addrs: p.addrs.clone(),
+                    relay: p.relay,
                 })
                 .collect(),
         };
@@ -448,6 +524,11 @@ impl Config {
             return invalid(format!("bad folder id {:?}: use [a-z0-9-]{{1,64}}", f.id));
         }
         check_folder_path(&f.path)?;
+        if let Some(p) = f.read_only_peers.iter().find(|p| !f.peers.contains(p)) {
+            return invalid(format!(
+                "read-only peer {p} is not one of the folder's peers"
+            ));
+        }
         for g in &self.folders {
             if g.id == f.id {
                 return Err(Error::Conflict(format!(
@@ -501,6 +582,8 @@ mod tests {
             path: path.into(),
             tag: None,
             peers: vec![],
+            read_only_peers: vec![],
+            key: None,
         }
     }
 
@@ -589,11 +672,14 @@ mod tests {
             name: "laptop".into(),
             id: PeerId([3; 32]),
             addrs: vec!["[2001:db8::1]:41641".parse().unwrap()],
+            relay: false,
         })
         .unwrap();
         let mut f = folder("docs", "/data/docs");
         f.tag = Some("work".into());
         f.peers = vec!["laptop".into()];
+        f.read_only_peers = vec!["laptop".into()];
+        f.key = Some([7; 32]);
         c.add_folder(f).unwrap();
         c.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), c);
@@ -644,6 +730,7 @@ mod tests {
             name: n.into(),
             id: PeerId([b; 32]),
             addrs: vec![],
+            relay: false,
         };
         c.add_peer(p("a", 1)).unwrap();
         c.add_peer(p("b", 2)).unwrap();

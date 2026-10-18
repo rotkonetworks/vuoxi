@@ -12,6 +12,67 @@ use vuoxi_core::{Meta, RelPath};
 /// Our in-flight writes: `.<name>.vuoxi-tmp` beside the target, never synced.
 pub const TMP_SUFFIX: &str = ".vuoxi-tmp";
 
+/// Where files replaced or deleted by a peer go, under the folder root:
+/// `.vuoxi-trash/<unix seconds>/<rel>`. Same filesystem, so a rename; never synced.
+pub const TRASH_DIR: &str = ".vuoxi-trash";
+
+/// Is `rel` the trash directory itself (it only ever lives at the root)?
+pub fn is_trash_dir(rel: &RelPath) -> bool {
+    rel.as_str() == TRASH_DIR
+}
+
+/// Move `rel` into the trash before a peer's change replaces or deletes it.
+/// Nothing to do if it is not there.
+pub fn to_trash(root: &Path, rel: &RelPath) -> io::Result<()> {
+    let src = root.join(rel.as_str());
+    if !fs::symlink_metadata(&src).is_ok_and(|m| m.is_file()) {
+        return Ok(());
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let dest = root
+        .join(TRASH_DIR)
+        .join(stamp.to_string())
+        .join(rel.as_str());
+    fs::create_dir_all(dest.parent().expect("under the stamp dir"))?;
+    // A second replacement of the same path within one second keeps both.
+    let mut d = dest.clone();
+    let mut n = 1;
+    while d.exists() {
+        d = dest.with_file_name(format!("{}.{n}", rel.file_name()));
+        n += 1;
+    }
+    fs::rename(src, d)
+}
+
+/// Drop trash older than `keep`. Returns how many stamp directories went.
+pub fn prune_trash(root: &Path, keep: Duration) -> io::Result<usize> {
+    let dir = root.join(TRASH_DIR);
+    let cutoff = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        .saturating_sub(keep.as_secs());
+    let mut gone = 0;
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    for e in entries.flatten() {
+        let old = e
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .is_some_and(|t| t < cutoff);
+        if old {
+            fs::remove_dir_all(e.path())?;
+            gone += 1;
+        }
+    }
+    Ok(gone)
+}
+
 pub fn is_tmp(rel: &RelPath) -> bool {
     rel.file_name().ends_with(TMP_SUFFIX)
 }

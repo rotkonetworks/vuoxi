@@ -37,7 +37,11 @@ struct Slot {
 }
 
 fn skipper(rules: &mut Rules) -> impl FnMut(&str) -> bool + '_ {
-    |r: &str| RelPath::new(r).is_ok_and(|p| matches!(rules.dir(&p), Decision::Skip(_)))
+    |r: &str| {
+        RelPath::new(r).is_ok_and(|p| {
+            crate::fs::is_trash_dir(&p) || matches!(rules.dir(&p), Decision::Skip(_))
+        })
+    }
 }
 
 fn to_event(r: Resolved) -> Option<Event> {

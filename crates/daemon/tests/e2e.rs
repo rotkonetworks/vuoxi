@@ -45,6 +45,11 @@ fn dev(base: &Path, name: &str, seed: u8) -> Dev {
 }
 
 async fn start(me: &Dev, other: &Dev) -> Node {
+    start_ro(me, other, false).await
+}
+
+/// `other_read_only`: `me` accepts nothing from `other` in the folder.
+async fn start_ro(me: &Dev, other: &Dev, other_read_only: bool) -> Node {
     Node::start(NodeConfig {
         secret: me.secret,
         bind: vec![format!("127.0.0.1:{}", me.port).parse().unwrap()],
@@ -58,9 +63,15 @@ async fn start(me: &Dev, other: &Dev) -> Node {
             id: id_of(&other.secret),
             addrs: vec![format!("127.0.0.1:{}", other.port).parse().unwrap()],
             folders: vec![FOLDER.into()],
+            read_only: if other_read_only {
+                vec![FOLDER.into()]
+            } else {
+                vec![]
+            },
         }],
         pull_every: Duration::from_millis(500),
         power_root: None,
+        trash_keep: Duration::from_secs(86400),
     })
     .await
     .unwrap()
@@ -77,7 +88,8 @@ fn tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
         for e in fs::read_dir(dir).unwrap() {
             let p = e.unwrap().path();
             if p.is_dir() {
-                if p.strip_prefix(root).unwrap() != Path::new("target") {
+                let r = p.strip_prefix(root).unwrap();
+                if r != Path::new("target") && r != Path::new(".vuoxi-trash") {
                     go(root, &p, out);
                 }
             } else if !p.to_string_lossy().ends_with(".vuoxi-tmp") {
@@ -88,6 +100,21 @@ fn tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
     }
     let mut out = BTreeMap::new();
     go(root, root, &mut out);
+    out
+}
+
+/// (rel, bytes) of everything in the trash, any stamp.
+fn trashed(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let t = root.join(".vuoxi-trash");
+    let Ok(stamps) = fs::read_dir(&t) else {
+        return vec![];
+    };
+    let mut out = vec![];
+    for s in stamps {
+        let s = s.unwrap().path();
+        out.extend(tree(&s));
+    }
+    out.sort();
     out
 }
 
@@ -189,12 +216,22 @@ async fn two_devices_converge() {
         "echo suppressed"
     );
 
-    // Delete on B.
+    // B's previous a.txt, replaced by A's edit, is in B's trash.
+    assert_eq!(
+        trashed(&b.root),
+        vec![("a.txt".to_string(), b"hello".to_vec())]
+    );
+
+    // Delete on B: A keeps its copy in the trash.
     fs::remove_file(b.root.join("only-b.md")).unwrap();
     nb.apply_event(FOLDER, Event::Removed(rel("only-b.md")))
         .await
         .unwrap();
     eventually("delete", || !a.root.join("only-b.md").exists()).await;
+    assert!(
+        trashed(&a.root).contains(&("only-b.md".to_string(), b"from b".to_vec())),
+        "a deleted file is recoverable from the trash"
+    );
 
     // Rename on A: a tombstone and a new file whose chunks B already has.
     fs::rename(a.root.join("sub/b.bin"), a.root.join("sub/c.bin")).unwrap();
@@ -265,6 +302,56 @@ async fn two_devices_converge() {
         nb.with_folder(FOLDER, |f| f.root_hash()),
         "index roots agree once the folders do"
     );
+
+    na.shutdown().await;
+    nb.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_peer_receives_but_cannot_change() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e/read-only");
+    let _ = fs::remove_dir_all(&base);
+    let a = dev(&base, "a", 3);
+    let b = dev(&base, "b", 4);
+    fs::create_dir_all(&a.root).unwrap();
+    fs::create_dir_all(&b.root).unwrap();
+    fs::write(a.root.join("doc.txt"), b"original").unwrap();
+
+    // A treats B as read-only; B trusts A normally.
+    let na = start_ro(&a, &b, true).await;
+    let nb = start(&b, &a).await;
+    na.sync_now();
+    nb.sync_now();
+    eventually("B receives", || {
+        fs::read(b.root.join("doc.txt")).ok().as_deref() == Some(b"original")
+    })
+    .await;
+
+    // B edits and adds; A must not take either, by offer or by pull.
+    fs::write(b.root.join("doc.txt"), b"tampered").unwrap();
+    fs::write(b.root.join("planted.txt"), b"x").unwrap();
+    nb.apply_event(FOLDER, Event::Changed(rel("doc.txt")))
+        .await
+        .unwrap();
+    nb.apply_event(FOLDER, Event::Changed(rel("planted.txt")))
+        .await
+        .unwrap();
+    na.sync_now();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(fs::read(a.root.join("doc.txt")).unwrap(), b"original");
+    assert!(!a.root.join("planted.txt").exists());
+
+    // A still updates B.
+    fs::write(a.root.join("doc.txt"), b"from a").unwrap();
+    na.apply_event(FOLDER, Event::Changed(rel("doc.txt")))
+        .await
+        .unwrap();
+    eventually("A still reaches B", || {
+        fs::read_dir(&b.root)
+            .unwrap()
+            .any(|e| fs::read(e.unwrap().path()).ok().as_deref() == Some(b"from a"))
+    })
+    .await;
 
     na.shutdown().await;
     nb.shutdown().await;

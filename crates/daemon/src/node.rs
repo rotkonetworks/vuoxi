@@ -58,6 +58,9 @@ pub struct PeerSpec {
     pub addrs: Vec<SocketAddr>,
     /// Folder ids this peer shares with us.
     pub folders: Vec<String>,
+    /// Of `folders`, those where this peer only receives: its offers are
+    /// ignored and we never pull from it.
+    pub read_only: Vec<String>,
 }
 
 pub struct NodeConfig {
@@ -70,6 +73,8 @@ pub struct NodeConfig {
     pub pull_every: Duration,
     /// Read the power supply to choose the mode; tests pin it instead.
     pub power_root: Option<PathBuf>,
+    /// How long files a peer replaced or deleted stay in `.vuoxi-trash`.
+    pub trash_keep: Duration,
 }
 
 struct Shared {
@@ -80,8 +85,10 @@ struct Shared {
 struct Inner {
     me: PeerId,
     folders: HashMap<String, Arc<Shared>>,
-    /// Which folders each peer may touch.
+    /// Which folders each peer may read.
     peers: HashMap<PeerId, Vec<String>>,
+    /// Which of those it may also change here.
+    writers: HashMap<PeerId, Vec<String>>,
     transport: IrohTransport,
     mode: ModeHandle,
     state_dir: PathBuf,
@@ -127,6 +134,14 @@ impl Node {
             .iter()
             .map(|p| (p.id, p.folders.clone()))
             .collect();
+        let writers = cfg
+            .peers
+            .iter()
+            .map(|p| {
+                let w = p.folders.iter().filter(|f| !p.read_only.contains(f));
+                (p.id, w.cloned().collect())
+            })
+            .collect();
         let mode = ModeHandle::new(match &cfg.power_root {
             Some(r) => PowerState::read(r).mode(),
             None => Mode::Live,
@@ -135,6 +150,7 @@ impl Node {
             me,
             folders,
             peers,
+            writers,
             transport,
             mode,
             state_dir: cfg.state_dir,
@@ -158,7 +174,7 @@ impl Node {
             }
         }));
 
-        for (peer, fs) in &inner.peers {
+        for (peer, fs) in &inner.writers {
             for f in fs.iter().filter(|f| inner.folders.contains_key(*f)) {
                 let (i, peer, f) = (inner.clone(), *peer, f.clone());
                 let every = cfg.pull_every;
@@ -167,6 +183,22 @@ impl Node {
                 ));
             }
         }
+
+        let roots: Vec<PathBuf> = inner
+            .folders
+            .values()
+            .map(|s| s.folder.lock().unwrap().root.clone())
+            .collect();
+        let keep = cfg.trash_keep;
+        tasks.push(tokio::spawn(async move {
+            loop {
+                for r in &roots {
+                    let r = r.clone();
+                    let _ = tokio::task::spawn_blocking(move || vfs::prune_trash(&r, keep)).await;
+                }
+                tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+            }
+        }));
 
         if let Some(root) = cfg.power_root {
             let i = inner.clone();
@@ -376,6 +408,7 @@ impl Inner {
                     return Ok(true);
                 }
                 Plan::Delete(m) => {
+                    vfs::to_trash(&root, &m.rel)?;
                     vfs::remove(&root, &m.rel)?;
                     s.folder.lock().unwrap().commit_remote(m, None)?;
                     return Ok(true);
@@ -454,6 +487,10 @@ impl Inner {
                 io::ErrorKind::InvalidData,
                 "assembled size differs from manifest",
             ));
+        }
+        if let Err(e) = vfs::to_trash(root, &m.rel) {
+            staged.abort();
+            return Err(e);
         }
         staged.commit(m.meta)?;
         Ok(offsets)
@@ -548,6 +585,11 @@ impl Inner {
     }
 
     async fn handle(self: Arc<Self>, peer: PeerId, w: Wire) -> Option<Wire> {
+        let writes = |f: &str| {
+            self.writers
+                .get(&peer)
+                .is_some_and(|fs| fs.iter().any(|x| x == f))
+        };
         let allowed = |f: &str| {
             self.peers
                 .get(&peer)
@@ -558,7 +600,7 @@ impl Inner {
                 let folder = self
                     .folders
                     .iter()
-                    .find(|(id, s)| allowed(id) && s.folder.lock().unwrap().owns(&m))
+                    .find(|(id, s)| writes(id) && s.folder.lock().unwrap().owns(&m))
                     .map(|(id, _)| id.clone())?;
                 let me = self.clone();
                 tokio::spawn(async move {

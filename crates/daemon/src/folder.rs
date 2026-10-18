@@ -21,13 +21,15 @@ pub trait Filter: Send {
     fn touched(&mut self, _rel: &RelPath) {}
 }
 
-/// `.git`, cache directories that say so (`CACHEDIR.TAG`), and our own temp files.
+/// `.git`, cache directories that say so (`CACHEDIR.TAG`), our trash and temp files.
 #[derive(Default)]
 pub struct BasicFilter;
 
 impl Filter for BasicFilter {
     fn skip_dir(&mut self, root: &Path, rel: &RelPath) -> bool {
-        rel.file_name() == ".git" || root.join(rel.as_str()).join("CACHEDIR.TAG").is_file()
+        rel.file_name() == ".git"
+            || vfs::is_trash_dir(rel)
+            || root.join(rel.as_str()).join("CACHEDIR.TAG").is_file()
     }
     fn skip_file(&mut self, _: &Path, rel: &RelPath) -> bool {
         vfs::is_tmp(rel)

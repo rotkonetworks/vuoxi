@@ -64,6 +64,12 @@ fn go(o: &Opts) -> Result<(), String> {
                 .filter(|f| f.peers.contains(&p.name))
                 .map(|f| f.id.clone())
                 .collect(),
+            read_only: cfg
+                .folders
+                .iter()
+                .filter(|f| f.read_only_peers.contains(&p.name))
+                .map(|f| f.id.clone())
+                .collect(),
         })
         .collect();
 
@@ -81,6 +87,7 @@ fn go(o: &Opts) -> Result<(), String> {
             peers,
             pull_every: Duration::from_secs(30),
             power_root: Some("/sys/class/power_supply".into()),
+            trash_keep: Duration::from_secs(u64::from(cfg.trash_days) * 86400),
         })
         .await
         .map_err(|e| format!("start: {e}"))?;

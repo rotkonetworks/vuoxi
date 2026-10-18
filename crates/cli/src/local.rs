@@ -115,6 +115,7 @@ fn go(cmd: Cmd, o: &Opts, json_out: bool) -> Result<(), String> {
                 name: name.clone(),
                 id,
                 addrs: addrs.clone(),
+                relay: o.relay,
             })
             .map_err(|e| e.to_string())?;
             // Folders naming a peer that was renamed away would dangle.
@@ -145,11 +146,22 @@ fn go(cmd: Cmd, o: &Opts, json_out: bool) -> Result<(), String> {
                     return Err(format!("unknown peer {p:?}; `vuoxi pair` it first"));
                 }
             }
+            for p in &o.read_only_peers {
+                if !o.peers.contains(p) {
+                    return Err(format!("--ro-peer {p}: also give it as --peer"));
+                }
+            }
+            let key = match &o.key {
+                Some(k) => Some(vuoxi_config::decode_key(k).map_err(|e| e.to_string())?),
+                None => Some(DeviceKey::generate().secret),
+            };
             c.add_folder(FolderConfig {
                 id: id.clone(),
                 path: path.clone(),
                 tag: o.tag.clone(),
                 peers: o.peers.clone(),
+                read_only_peers: o.read_only_peers.clone(),
+                key,
             })
             .map_err(|e| e.to_string())?;
             save(&c, &cpath)?;
@@ -193,6 +205,26 @@ fn go(cmd: Cmd, o: &Opts, json_out: bool) -> Result<(), String> {
                 } else {
                     lines.join("\n")
                 },
+            );
+        }
+        Cmd::FolderKey(id) => {
+            let c = Config::load(&cpath).map_err(|e| e.to_string())?;
+            let f = c
+                .folders
+                .iter()
+                .find(|f| f.id == id)
+                .ok_or_else(|| format!("no folder {id}"))?;
+            let key = f
+                .key
+                .as_ref()
+                .map(vuoxi_config::encode_key)
+                .ok_or_else(|| {
+                    format!("folder {id} has no key; re-add it or set `key` in the config")
+                })?;
+            emit(
+                json_out,
+                json!({"kind": "folder_key", "schema": 1, "id": id, "key": key}),
+                key,
             );
         }
         _ => unreachable!("routed by main"),
