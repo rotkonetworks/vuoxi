@@ -40,7 +40,7 @@
 
 #![forbid(unsafe_code)]
 
-mod codec;
+pub mod codec;
 
 pub use codec::{CodecError, MAX_FRAME, decode_frame, encode_frame};
 

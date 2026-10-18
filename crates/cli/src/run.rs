@@ -29,6 +29,9 @@ fn go(o: &Opts) -> Result<(), String> {
     };
     let key =
         DeviceKey::load_or_create(&key_path).map_err(|e| format!("{}: {e}", key_path.display()))?;
+    if let Some(dir) = &cfg.relay_dir {
+        return relay(&cfg, key, dir);
+    }
     if cfg.folders.is_empty() {
         return Err("no folders configured; see `vuoxi folder add`".into());
     }
@@ -45,6 +48,7 @@ fn go(o: &Opts) -> Result<(), String> {
             id: f.id.clone(),
             root: f.path.clone(),
             filter: Box::new(RulesFilter::new(&f.path, tag)),
+            key: f.key,
         });
         watched.push(Watched {
             id: f.id.clone(),
@@ -70,6 +74,7 @@ fn go(o: &Opts) -> Result<(), String> {
                 .filter(|f| f.read_only_peers.contains(&p.name))
                 .map(|f| f.id.clone())
                 .collect(),
+            relay: p.relay,
         })
         .collect();
 
@@ -150,4 +155,41 @@ fn go(o: &Opts) -> Result<(), String> {
 /// everything else syncs.
 fn vuoxi_rules_tag_default() -> vuoxi_rules::Tag {
     vuoxi_rules::Tag::Code
+}
+
+/// Relay mode: serve the configured devices' sealed folders from `dir`.
+/// No folders, no folder keys: this machine cannot read what it stores.
+fn relay(cfg: &Config, key: DeviceKey, dir: &std::path::Path) -> Result<(), String> {
+    use vuoxi_daemon::{RelayHandler, RelayStore};
+    use vuoxi_transport_iroh::{Allowlist, Config as TransportConfig, IrohTransport};
+    if !cfg.folders.is_empty() {
+        return Err("a relay holds no folders; remove them or unset relay_dir".into());
+    }
+    let store = RelayStore::open(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async move {
+        let mut tc =
+            TransportConfig::new(key.secret, Allowlist::new(cfg.peers.iter().map(|p| p.id)));
+        tc.bind = cfg.listen.clone();
+        let t = IrohTransport::bind(tc).await.map_err(|e| e.to_string())?;
+        let _serve = t.serve(RelayHandler(store));
+        eprintln!(
+            "vuoxi relay: {} listening on {:?}; storing in {}; devices: {}",
+            vuoxi_config::encode_id(&t.peer_id()),
+            t.local_addrs(),
+            dir.display(),
+            cfg.peers
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;
+        t.close().await;
+        Ok(())
+    })
 }

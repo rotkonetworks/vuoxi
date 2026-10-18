@@ -20,7 +20,7 @@ impl Service<(PeerId, Wire)> for Echoer {
                 head: since,
                 manifests: vec![],
             }),
-            Wire::Chunk(..) | Wire::Batch { .. } => None,
+            _ => None,
         }))
     }
 }

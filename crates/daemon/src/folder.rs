@@ -328,6 +328,15 @@ impl Folder {
         self.record(m)
     }
 
+    /// Journal entries after `cursor`.
+    pub fn since(&self, cursor: u64, limit: usize) -> io::Result<Vec<(u64, PathId)>> {
+        self.store.since(cursor, limit)
+    }
+
+    pub fn manifest(&self, p: PathId) -> Option<Manifest> {
+        self.catalog.get(&p).cloned()
+    }
+
     /// Answer a peer's [`Wire::Pull`].
     pub fn pull(&self, epoch: u64, since: u64, limit: usize) -> io::Result<Wire> {
         let since = if epoch == self.epoch() { since } else { 0 };

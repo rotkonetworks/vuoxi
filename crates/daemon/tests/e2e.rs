@@ -6,8 +6,11 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use vuoxi_core::{PeerId, RelPath};
-use vuoxi_daemon::{BasicFilter, Event, FolderSpec, Node, NodeConfig, PeerSpec};
+use vuoxi_daemon::{
+    BasicFilter, Event, FolderSpec, Node, NodeConfig, PeerSpec, RelayHandler, RelayStore,
+};
 use vuoxi_layers::Mode;
+use vuoxi_transport_iroh::{Allowlist, Config as TransportConfig, IrohTransport};
 
 const FOLDER: &str = "test";
 
@@ -58,6 +61,7 @@ async fn start_ro(me: &Dev, other: &Dev, other_read_only: bool) -> Node {
             id: FOLDER.into(),
             root: me.root.clone(),
             filter: Box::new(BasicFilter),
+            key: None,
         }],
         peers: vec![PeerSpec {
             id: id_of(&other.secret),
@@ -68,6 +72,7 @@ async fn start_ro(me: &Dev, other: &Dev, other_read_only: bool) -> Node {
             } else {
                 vec![]
             },
+            relay: false,
         }],
         pull_every: Duration::from_millis(500),
         power_root: None,
@@ -355,4 +360,111 @@ async fn read_only_peer_receives_but_cannot_change() {
 
     na.shutdown().await;
     nb.shutdown().await;
+}
+
+/// A device that talks only to the relay `r`.
+async fn start_via_relay(me: &Dev, r: &Dev, key: [u8; 32]) -> Node {
+    Node::start(NodeConfig {
+        secret: me.secret,
+        bind: vec![format!("127.0.0.1:{}", me.port).parse().unwrap()],
+        state_dir: me.state.clone(),
+        folders: vec![FolderSpec {
+            id: FOLDER.into(),
+            root: me.root.clone(),
+            filter: Box::new(BasicFilter),
+            key: Some(key),
+        }],
+        peers: vec![PeerSpec {
+            id: id_of(&r.secret),
+            addrs: vec![format!("127.0.0.1:{}", r.port).parse().unwrap()],
+            folders: vec![FOLDER.into()],
+            read_only: vec![],
+            relay: true,
+        }],
+        pull_every: Duration::from_millis(300),
+        power_root: None,
+        trash_keep: Duration::from_secs(86400),
+    })
+    .await
+    .unwrap()
+}
+
+/// Every byte the relay stored, concatenated.
+fn relay_bytes(dir: &Path) -> Vec<u8> {
+    fn go(d: &Path, out: &mut Vec<u8>) {
+        for e in fs::read_dir(d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                go(&p, out);
+            } else {
+                out.extend(fs::read(&p).unwrap());
+            }
+        }
+    }
+    let mut out = vec![];
+    go(dir, &mut out);
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn devices_sync_through_a_relay_that_cannot_read() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e/relay");
+    let _ = fs::remove_dir_all(&base);
+    let a = dev(&base, "a", 5);
+    let b = dev(&base, "b", 6);
+    let r = dev(&base, "r", 7);
+    let key = [42u8; 32];
+    fs::create_dir_all(&a.root).unwrap();
+    fs::create_dir_all(&b.root).unwrap();
+    fs::write(a.root.join("diary.txt"), b"SECRET-DIARY-CONTENT").unwrap();
+    fs::write(a.root.join("big.bin"), big(9, 700_000)).unwrap();
+
+    // The relay knows the devices' keys (to let them in), never the folder key.
+    let mut tc = TransportConfig::new(
+        r.secret,
+        Allowlist::new([id_of(&a.secret), id_of(&b.secret)]),
+    );
+    tc.bind = vec![format!("127.0.0.1:{}", r.port).parse().unwrap()];
+    let relay = IrohTransport::bind(tc).await.unwrap();
+    let _serve = relay.serve(RelayHandler(RelayStore::open(&r.state).unwrap()));
+
+    let na = start_via_relay(&a, &r, key).await;
+    let nb = start_via_relay(&b, &r, key).await;
+    eventually("A -> relay -> B", || {
+        fs::read(b.root.join("diary.txt")).ok().as_deref() == Some(b"SECRET-DIARY-CONTENT")
+            && fs::read(b.root.join("big.bin")).ok() == fs::read(a.root.join("big.bin")).ok()
+    })
+    .await;
+
+    // B changes something and goes away; A, starting later, still gets it.
+    na.shutdown().await;
+    fs::write(b.root.join("diary.txt"), b"SECRET-EDIT-WHILE-A-SLEPT").unwrap();
+    nb.apply_event(FOLDER, Event::Changed(rel("diary.txt")))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    nb.shutdown().await;
+    let na = start_via_relay(&a, &r, key).await;
+    eventually("relay holds B's change for A", || {
+        fs::read(a.root.join("diary.txt")).ok().as_deref() == Some(b"SECRET-EDIT-WHILE-A-SLEPT")
+    })
+    .await;
+
+    // Nothing on the relay's disk is readable: no content, no names.
+    let stored = relay_bytes(&r.state);
+    assert!(stored.len() > 700_000, "the relay does hold the data");
+    for needle in [&b"SECRET"[..], b"diary", b"big.bin", FOLDER.as_bytes()] {
+        assert!(
+            !stored.windows(needle.len()).any(|w| w == needle),
+            "relay stored {:?} in the clear",
+            String::from_utf8_lossy(needle)
+        );
+    }
+    let plain = big(9, 700_000);
+    assert!(
+        !stored.windows(64).any(|w| w == &plain[1000..1064]),
+        "file bytes in the clear"
+    );
+
+    na.shutdown().await;
 }

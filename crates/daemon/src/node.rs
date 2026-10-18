@@ -15,7 +15,8 @@
 
 use crate::folder::{Filter, Folder, Plan};
 use crate::fs::{self as vfs, Scan, Staged};
-use std::collections::HashMap;
+use crate::seal::Seal;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -27,7 +28,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tower_service::Service;
 use vuoxi_chunk::ChunkEntry;
-use vuoxi_core::{Error, Manifest, PeerId, RelPath, Wire};
+use vuoxi_core::{ChunkId, Error, Manifest, PeerId, RelPath, Wire};
 use vuoxi_layers::{Mode, ModeHandle, PowerState};
 use vuoxi_transport_iroh::{Allowlist, Config as TransportConfig, IrohTransport, Serve};
 
@@ -51,6 +52,8 @@ pub struct FolderSpec {
     pub id: String,
     pub root: PathBuf,
     pub filter: Box<dyn Filter>,
+    /// Folder key; without one the folder is never sent to relays.
+    pub key: Option<[u8; 32]>,
 }
 
 pub struct PeerSpec {
@@ -61,6 +64,9 @@ pub struct PeerSpec {
     /// Of `folders`, those where this peer only receives: its offers are
     /// ignored and we never pull from it.
     pub read_only: Vec<String>,
+    /// A relay: it gets our folders sealed (see [`crate::seal`]) and we pull
+    /// sealed manifests and chunks back from it.
+    pub relay: bool,
 }
 
 pub struct NodeConfig {
@@ -93,6 +99,10 @@ struct Inner {
     mode: ModeHandle,
     state_dir: PathBuf,
     wake: Notify,
+    relays: HashSet<PeerId>,
+    seals: HashMap<String, Seal>,
+    /// Local changes to push to relays.
+    relay_wake: Notify,
 }
 
 /// A running device. Dropping it stops serving; [`Node::shutdown`] also closes connections.
@@ -118,7 +128,11 @@ impl Node {
         }
 
         let mut folders = HashMap::new();
+        let mut seals = HashMap::new();
         for f in cfg.folders {
+            if let Some(k) = &f.key {
+                seals.insert(f.id.clone(), Seal::new(&f.id, k));
+            }
             std::fs::create_dir_all(&f.root)?;
             let folder = Folder::open(&f.id, &f.root, me, &cfg.state_dir, f.filter)?;
             folders.insert(
@@ -151,6 +165,9 @@ impl Node {
             folders,
             peers,
             writers,
+            relays: cfg.peers.iter().filter(|p| p.relay).map(|p| p.id).collect(),
+            seals,
+            relay_wake: Notify::new(),
             transport,
             mode,
             state_dir: cfg.state_dir,
@@ -178,9 +195,17 @@ impl Node {
             for f in fs.iter().filter(|f| inner.folders.contains_key(*f)) {
                 let (i, peer, f) = (inner.clone(), *peer, f.clone());
                 let every = cfg.pull_every;
-                tasks.push(tokio::spawn(
-                    async move { i.pull_loop(peer, f, every).await },
-                ));
+                if inner.relays.contains(&peer) {
+                    if inner.seals.contains_key(&f) {
+                        tasks.push(tokio::spawn(
+                            async move { i.relay_loop(peer, f, every).await },
+                        ));
+                    }
+                } else {
+                    tasks.push(tokio::spawn(
+                        async move { i.pull_loop(peer, f, every).await },
+                    ));
+                }
             }
         }
 
@@ -270,9 +295,11 @@ impl Inner {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no folder {folder}")))
     }
 
+    /// Devices (not relays) that share `folder`.
     fn peers_of(&self, folder: &str) -> Vec<PeerId> {
         self.peers
             .iter()
+            .filter(|(p, _)| !self.relays.contains(p))
             .filter(|(_, fs)| fs.iter().any(|f| f == folder))
             .map(|(p, _)| *p)
             .collect()
@@ -365,6 +392,7 @@ impl Inner {
         if ms.is_empty() || self.mode.get() == Mode::Hold {
             return;
         }
+        self.relay_wake.notify_waiters();
         for peer in self.peers_of(folder) {
             let mut t = self.transport.clone();
             let ms = ms.clone();
@@ -454,23 +482,16 @@ impl Inner {
         let mut staged = Staged::new(root, &m.rel)?;
         let mut offsets = Vec::with_capacity(m.chunks.len());
         let mut at = 0u64;
+        let folder = s.folder.lock().unwrap().id.clone();
         for &id in &m.chunks {
             let local = s.folder.lock().unwrap().read_chunk(id);
             let bytes = match local {
                 Some(b) => b,
-                None => match self.transport.clone().call((peer, Wire::Want(id))).await {
-                    Ok(Some(Wire::Chunk(got, b)))
-                        if got == id && vuoxi_chunk::verify(id, &b).is_ok() =>
-                    {
-                        b
-                    }
-                    Ok(_) => {
-                        staged.abort();
-                        return Err(io::Error::other("peer did not supply a valid chunk"));
-                    }
+                None => match self.fetch_chunk(peer, &folder, id).await {
+                    Ok(b) => b,
                     Err(e) => {
                         staged.abort();
-                        return Err(io::Error::other(e.to_string()));
+                        return Err(e);
                     }
                 },
             };
@@ -494,6 +515,172 @@ impl Inner {
         }
         staged.commit(m.meta)?;
         Ok(offsets)
+    }
+
+    /// One chunk from a peer, verified; from a relay, unsealed and verified.
+    async fn fetch_chunk(&self, peer: PeerId, folder: &str, id: ChunkId) -> io::Result<Vec<u8>> {
+        let seal = self
+            .relays
+            .contains(&peer)
+            .then(|| self.seals.get(folder))
+            .flatten();
+        let ask = seal.map_or(id, |s| s.relay_id(id));
+        let reply = self
+            .transport
+            .clone()
+            .call((peer, Wire::Want(ask)))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let bad = || io::Error::other("peer did not supply a valid chunk");
+        match (reply, seal) {
+            (Some(Wire::Chunk(got, b)), None) if got == id => {
+                vuoxi_chunk::verify(id, &b).map_err(|_| bad())?;
+                Ok(b)
+            }
+            (Some(Wire::Chunk(got, b)), Some(s)) if got == ask => {
+                s.open_chunk(id, &b).map_err(|_| bad())
+            }
+            _ => Err(bad()),
+        }
+    }
+
+    async fn relay_loop(&self, relay: PeerId, folder: String, every: Duration) {
+        loop {
+            if self.mode.get() != Mode::Hold {
+                let _ = self.relay_push(relay, &folder).await;
+                let _ = self.relay_pull(relay, &folder).await;
+            }
+            let wait = match self.mode.get() {
+                Mode::Live => every,
+                Mode::Batched => every * 10,
+                Mode::Frugal | Mode::Hold => every * 30,
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = self.wake.notified() => {}
+                _ = self.relay_wake.notified() => {}
+            }
+        }
+    }
+
+    fn push_cursor_path(&self, relay: PeerId, folder: &str) -> PathBuf {
+        let hex: String = relay.0.iter().map(|b| format!("{b:02x}")).collect();
+        self.state_dir.join(folder).join(format!("pushed-{hex}"))
+    }
+
+    /// Send what our journal recorded since the last push: missing chunks
+    /// first, then the sealed manifest, so a reader never sees a manifest
+    /// whose chunks are not there.
+    async fn relay_push(&self, relay: PeerId, folder: &str) -> io::Result<()> {
+        let (Some(seal), Ok(s)) = (self.seals.get(folder), self.shared(folder)) else {
+            return Ok(());
+        };
+        let cpath = self.push_cursor_path(relay, folder);
+        let mut cur: u64 = std::fs::read_to_string(&cpath)
+            .ok()
+            .and_then(|x| x.trim().parse().ok())
+            .unwrap_or(0);
+        let call = |w: Wire| {
+            let mut t = self.transport.clone();
+            async move {
+                t.call((relay, w))
+                    .await
+                    .map_err(|e| io::Error::other(e.to_string()))
+            }
+        };
+        loop {
+            let entries = s.folder.lock().unwrap().since(cur, PULL_LIMIT as usize)?;
+            let Some(&(last, _)) = entries.last() else {
+                return Ok(());
+            };
+            let mut seen = HashSet::new();
+            for (_, p) in entries {
+                if !seen.insert(p) {
+                    continue;
+                }
+                let Some(m) = s.folder.lock().unwrap().manifest(p) else {
+                    continue;
+                };
+                let rids: Vec<ChunkId> = m.chunks.iter().map(|c| seal.relay_id(*c)).collect();
+                let missing = match call(Wire::Has(rids.clone())).await? {
+                    Some(Wire::Missing(ids)) => ids,
+                    _ => return Err(io::Error::other("relay did not answer Has")),
+                };
+                let mut complete = true;
+                for (plain, rid) in m.chunks.iter().zip(&rids) {
+                    if !missing.contains(rid) {
+                        continue;
+                    }
+                    // The file may have changed since: a newer journal entry covers it.
+                    let Some(b) = s.folder.lock().unwrap().read_chunk(*plain) else {
+                        complete = false;
+                        break;
+                    };
+                    if !matches!(
+                        call(Wire::Chunk(*rid, seal.seal_chunk(*plain, &b))).await?,
+                        Some(Wire::Ack(_))
+                    ) {
+                        return Err(io::Error::other("relay refused a chunk"));
+                    }
+                }
+                if complete {
+                    let put = Wire::Put {
+                        folder: seal.folder_tag().to_owned(),
+                        blob: seal.seal_manifest(&m),
+                    };
+                    if !matches!(call(put).await?, Some(Wire::Ack(_))) {
+                        return Err(io::Error::other("relay refused a manifest"));
+                    }
+                }
+            }
+            cur = last;
+            let tmp = cpath.with_extension("tmp");
+            std::fs::write(&tmp, format!("{cur}\n"))?;
+            std::fs::rename(&tmp, &cpath)?;
+        }
+    }
+
+    /// Like [`Inner::pull_once`], from a relay's sealed log.
+    async fn relay_pull(&self, relay: PeerId, folder: &str) -> io::Result<()> {
+        let Some(seal) = self.seals.get(folder) else {
+            return Ok(());
+        };
+        let mut cur = self.load_cursor(relay, folder);
+        loop {
+            let req = Wire::Pull {
+                folder: seal.folder_tag().to_owned(),
+                epoch: cur.0,
+                since: cur.1,
+                limit: PULL_LIMIT,
+            };
+            let reply = self
+                .transport
+                .clone()
+                .call((relay, req))
+                .await
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            let Some(Wire::Blobs { epoch, head, blobs }) = reply else {
+                return Ok(());
+            };
+            if epoch != cur.0 {
+                cur = (epoch, 0);
+            }
+            let more = head > cur.1 && !blobs.is_empty();
+            for b in blobs {
+                // A blob that does not open is not ours to apply; skip it.
+                let Ok(m) = seal.open_manifest(&b) else {
+                    continue;
+                };
+                if !self.apply_remote(relay, folder, m).await? {
+                    return Ok(());
+                }
+            }
+            cur = (epoch, head);
+            self.save_cursor(relay, folder, cur)?;
+            if !more {
+                return Ok(());
+            }
+        }
     }
 
     fn cursor_path(&self, peer: PeerId, folder: &str) -> PathBuf {

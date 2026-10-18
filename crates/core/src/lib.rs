@@ -138,6 +138,26 @@ pub enum Wire {
         head: u64,
         manifests: Vec<Manifest>,
     },
+    // Relay messages. A relay stores a folder as opaque data: encrypted
+    // manifest blobs in an append-only log, and encrypted chunks named by a
+    // keyed hash. `folder` here is a keyed hash of the folder id, never the id.
+    /// Append an encrypted manifest to the relay's log for `folder`.
+    Put {
+        folder: String,
+        blob: Vec<u8>,
+    },
+    /// Acknowledges a `Put` (with the new log head) or an uploaded `Chunk`.
+    Ack(u64),
+    /// Which of these chunks does the relay lack?
+    Has(Vec<ChunkId>),
+    /// Answer to `Has`.
+    Missing(Vec<ChunkId>),
+    /// Answer to `Pull` from a relay: log entries after the cursor.
+    Blobs {
+        epoch: u64,
+        head: u64,
+        blobs: Vec<Vec<u8>>,
+    },
 }
 
 /// Moves [`Wire`] messages to one peer; answers with the peer's reply, if any.

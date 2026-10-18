@@ -15,6 +15,7 @@ path = "src/main.rs"
 vuoxi-rpc.workspace = true
 vuoxi-config.workspace = true
 vuoxi-daemon.workspace = true
+vuoxi-transport-iroh.workspace = true
 vuoxi-core.workspace = true
 vuoxi-rules.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
